@@ -1,37 +1,25 @@
-/*
-Проект GSM реле на Arduino с использованием модуля NEOWAY M590
-Проект был написан давно, но небыл никуда опубликован, лежал на ПК
+//******************************************************************************************
+// Проект GSM реле на Arduino с использованием модуля NEOWAY M590
+//******************************************************************************************
 
-Функционал реле следующий:
-1. Реле вкл и выкл нагрузку по звонку, при звонке на устройство проискодит сброс вызова и смена состояния реле ВКЛ/ВЫКЛ;
-2. Включение и выключение реле через SMS, отправляем смс на устройство с текстом "relay on" "relay off" в ответ получаем смс о статусе;
-3. Включение с таймером через SMS, отправляем смс на устройство с текстом "timer МИН" например "timer 60" включит реле и через 60 мин сам выкл его;
-4. Проверка температуры с датчика DS18b20, отправляем смс на устройство с текстом "temper" в ответ получаем смс с текущей температурой;
-5. Также я попытался реализовать возможность самоподогрева устройства отправкой SMS с текстом "termostat ТЕМПЕРАТУРА ВКЛ ПОДОГРЕВА"
-например "termostat -10" если датчик стоит внутри устройства, то при достижении -10 град. вкл самоподогрев;
-6. И самое главное в устройстве реализована защита от сторонних звонков и СМС, в устройстве сохраняются 2 номера тел MASTER и MASTER2 с которых можно управлять устройством.
-Имеется возможность смены этих номеров при помощи СМС, для этого отправляем смс с текстом "new master" или "new master2" с номера который вы хотите сделать мастер номером,
-то есть если вы хотите номер 123456789 сделать первым, то отправляем с него текст "new master" а если хотите сделать его вторым, то отправляете с него смс "new master2";
-*/
 
 #include <EEPROM.h>
 #include <SoftwareSerial.h>
-SoftwareSerial mySerial(2, 3);         // RX, TX
+SoftwareSerial mySerial(A2, A3);         // RX, TX
 #include <OneWire.h>
 
-// #define USE_readNumberSIM           // раскоментировать если нужна возможность чтения номера из СИМ карты
-// #define USE_TERMOSTAT               // закоментировать если не нужен термостат
+// #define USE_readNumberSIM           // раскоментировать для считывания номера из СИМ карты
+// #define USE_TERMOSTAT               // раскоментировать для включения самоподогрева
 #define USE_TIMER                      // закоментировать если не нужен таймер
 
 //---------КОНТАКТЫ--------------
 #define power 12                       // пин реле
-#define powLED 6                       // индикация режима состояния модема M590
-#define LED 7                          // индикация состояния реле
+#define STAT_LED 13                     // индикация состояния реле и состояния модема M590 при включении
 #define BUTTON 4                       // кнопка вкл/выкл розетки вручную
-#define heater 13                      // нагреватель (можно использовать керамический ресистор на 3-6к)
-#define ds18b20 13                      // датчик температуры DS18b20
-OneWire sensDs (ds18b20);                    // датчик подключен к выводу 9
-#define DS_POWER_MODE  1                  // режим питания, 0 - внешнее, 1 - паразитное
+#define HEATER 6                      // нагреватель (можно использовать керамический ресистор на 3-6к)
+#define DS18B20 7                     // датчик температуры DS18B20
+#define DS_POWER_MODE  1               // режим питания, 0 - внешнее, 1 - паразитное
+OneWire sensDs (DS18B20);              // датчик подключен к выводу 9
 //---------------------------------
 String MASTER = "79123456789";          // 1-й телефон владельца
 String MASTER2 = "79123456789";         // 2-й телефон владельца
@@ -44,13 +32,14 @@ uint32_t curTime;
 byte bufData[9];                        // буфер данных для считывания температуры с DS18B20
 #ifdef USE_TERMOSTAT
 byte tmpFlag;
-int8_t heaterVal = EEPROM.read(3);
+int8_t HEATERVal = EEPROM.read(3);
 #endif
 
 //--------------------------------------------------------------
 // процедура отправки команд модему:
 //------------------------------------------------------------------------------------------------------------
-bool sendAtCmd(String at_send, String ok_answer = "OK", String err_answer = "", uint16_t wait_sec = 2) {
+bool sendAtCmd(String at_send, String ok_answer = "OK", String err_answer = "", uint16_t wait_sec = 2)
+{
   uint32_t exit_ms = millis() + wait_sec * 1000;
   String answer;
   if (at_send != "") mySerial.println(at_send);
@@ -69,14 +58,16 @@ bool sendAtCmd(String at_send, String ok_answer = "OK", String err_answer = "", 
   return false;
 }
 
-//-------------------------------------------------------------------------------------------
+
+//-----------------------------------------------------------------------------------------
+//                             ИНИЦИАЛИЗАЦИЯ УСТРОЙСТВА
+//-----------------------------------------------------------------------------------------
 void setup()
 {
-  //-----------------------------------------------------------------------------------------
   pinMode(11, OUTPUT);
   digitalWrite(11, HIGH);
-  pinMode(powLED, OUTPUT);
-  digitalWrite(powLED, LOW);
+  pinMode(STAT_LED, OUTPUT);
+  digitalWrite(STAT_LED, LOW);
   pinMode(power, OUTPUT);                 // пин 12 подключаем как выход для питания базы транзистора
   if(EEPROM.read(2)) {
     state = EEPROM.read(1);
@@ -86,10 +77,10 @@ void setup()
     EEPROM.update(1,state);
     EEPROM.update(2,1);
   }
-  pinMode(LED, OUTPUT);
-  digitalWrite(LED, state);
-  pinMode(heater, OUTPUT);
-  pinMode(BUTTON, INPUT_PULLUP);               //конфигурация кнопки на вход
+  pinMode(STAT_LED, OUTPUT);
+  digitalWrite(STAT_LED, state);
+  pinMode(HEATER, OUTPUT);
+  pinMode(BUTTON, INPUT_PULLUP);               // конфигурация кнопки на вход
 
   //Serial.begin(9600);
   mySerial.begin(9600);                //подключаем порт модема
@@ -114,7 +105,7 @@ void setup()
     mySerial.println("AT+CSQ");          //вывести в терминал уровень сигнала (если 99, то связи нет)
     delay(300);
     if(mySerial.find("+CSQ: 99")) {
-      digitalWrite(powLED,!digitalRead(powLED));
+      digitalWrite(STAT_LED,!digitalRead(STAT_LED));
     }
     else {
       break;
@@ -122,7 +113,7 @@ void setup()
   }
   sendAtCmd("AT+CMGD=1,4");     //стереть все старые сообщения
   for(byte i=0; i<7; i++) { // Помигаем и подождем перед считыванием номера с СИМ
-    digitalWrite(powLED,!digitalRead(powLED));
+    digitalWrite(STAT_LED,!digitalRead(STAT_LED));
     delay(150);
     }
   if (read_master_eeprom(10).indexOf("79") > -1 && read_master_eeprom(10).length() == 11) {
@@ -132,7 +123,7 @@ void setup()
     MASTER2 = read_master2_eeprom(30);
   }
 
-  digitalWrite(powLED,HIGH);
+  digitalWrite(STAT_LED,HIGH);
 
   //Serial.print("MASTER №: ");
   //Serial.println(MASTER);
@@ -141,7 +132,8 @@ void setup()
 }
 
 
-// процедура отправки СМС
+//---------------------------------------------------
+// Процедура отправки СМС
 //---------------------------------------------------
 void sms(String text, String phone)
 {
@@ -153,9 +145,12 @@ void sms(String text, String phone)
   delay(5000);
 }
 
-//функция вкл/выкл кнопкой
-//----------------------------------------------------
-void btnCheck() {
+
+//---------------------------------------------------
+// Процедура обработки кнопки
+//---------------------------------------------------
+void btnCheck()
+{
   delay(40);
   if(digitalRead(BUTTON)==LOW) {
    if (state == false) {
@@ -166,7 +161,7 @@ void btnCheck() {
     digitalWrite(power, LOW);
     state = false;
    }
-   digitalWrite(LED, state);
+   digitalWrite(STAT_LED, state);
    EEPROM.update(1,state);
    timer = 0;
    EEPROM.update(2,1);
@@ -175,9 +170,12 @@ void btnCheck() {
 }
 
 
-//------- функция чтения номера из СИМ -----------
+//---------------------------------------------------
+// Процедура чтения номера из СИМ
+//---------------------------------------------------
 #ifdef USE_readNumberSIM
-void readNumberSIM() {
+void readNumberSIM()
+{
   byte ch = 0;
   byte x = 0;
   while (mySerial.available()) mySerial.read();
@@ -202,10 +200,12 @@ void readNumberSIM() {
 }
 #endif
 
-//******************************************************************************************
-// чтение номера из EEPROM
-//******************************************************************************************
-String read_master_eeprom( int adr) {
+
+//---------------------------------------------------
+// Процедура чтения номера из EEPROM
+//---------------------------------------------------
+String read_master_eeprom( int adr)
+{
     String number = "";
     for ( byte i = 0; i < 12; i++) EEPROM.get( adr + i, number[i] );
     return number;
@@ -215,17 +215,26 @@ String read_master2_eeprom( int adr) {
     for ( byte i = 0; i < 12; i++) EEPROM.get( adr + i, number[i] );
     return number;
 }
-//******************************************************************************************
-// запись номера в EEPROM
-//******************************************************************************************
-void update_master_eeprom(int addr) {
+
+
+//---------------------------------------------------
+// Процедура записи номера в EEPROM
+//---------------------------------------------------
+void update_master_eeprom(int addr)
+{
     for(byte i = 0; i < 12; i++) EEPROM.put(addr+i, MASTER[i]);
 }
-void update_master2_eeprom(int addr) {
+void update_master2_eeprom(int addr)
+{
     for(byte i = 0; i < 12; i++) EEPROM.put(addr+i, MASTER2[i]);
 }
 
-float currentTemper() {
+
+//---------------------------------------------------
+// Процедура измерения температуры с датчика DS18B20
+//---------------------------------------------------
+float currentTemper()
+{
     float temperature;  // измеренная температура
     sensDs.reset();  // сброс шины
     sensDs.write(0xCC, DS_POWER_MODE); // пропуск ROM
@@ -244,22 +253,23 @@ float currentTemper() {
 
 
 //-----------------------------------------------------------------------------
-// Цикл loop
+// Основной цикл loop
 //-----------------------------------------------------------------------------
 void loop()
 {
-  if(digitalRead(BUTTON)==LOW) btnCheck();          //есть была нажата кнопка
+  if(digitalRead(BUTTON)==LOW) btnCheck();                // если была нажата кнопка
 
-  if (mySerial.available()) incoming_call_sms();          //есть данные от GSM модуля
+  if (mySerial.available()) incoming_call_sms();          // если пришли данные от GSM модуля
 
-  #ifdef USE_TERMOSTAT
-  if(heaterVal != 0 && millis()-curTime>30000) {
-    if(currentTemper() <= heaterVal && tmpFlag == false) {
-      digitalWrite(heater,HIGH);
+  #ifdef USE_TERMOSTAT                                    // если включена функция самоподогрева модема
+  if(HEATERVal != 0 && millis()-curTime>30000)
+  {
+    if(currentTemper() <= HEATERVal && tmpFlag == false) {
+      digitalWrite(HEATER,HIGH);
       tmpFlag=true;
     }
-    else if(currentTemper() >= (heaterVal+4) && tmpFlag == true) {
-      digitalWrite(heater,LOW);
+    else if(currentTemper() >= (HEATERVal+4) && tmpFlag == true) {
+      digitalWrite(HEATER,LOW);
       tmpFlag=false;
       }
     curTime=millis();
@@ -267,23 +277,24 @@ void loop()
   }
   #endif
 
-  #ifdef USE_TIMER
-  if(timer != 0) {
+  #ifdef USE_TIMER                                          // если включена функция таймера
+  if(timer != 0)
+  {
     if(timer <= millis()) {
       digitalWrite(power, LOW);
       state = false;
-      digitalWrite(LED, state);
+      digitalWrite(STAT_LED, state);
       EEPROM.update(1,state);
       timer = 0;
       EEPROM.update(2,1);
      }
   }
   #endif
-}
+}                   // end loop
 
 
 //-----------------------------------------------------------------------------
-//процедура обработки звонка и смс
+// Процедура обработки звонков и смс
 //-----------------------------------------------------------------------------
 enum Command {
     CMD_DELETE_SMS,
@@ -315,7 +326,8 @@ Command getCommand(const String& val) {
     return CMD_UNKNOWN;
 }
 
-void incoming_call_sms() {
+void incoming_call_sms()
+{
     byte ch = 0;
     delay(200);
     while (mySerial.available()) {
@@ -336,7 +348,7 @@ void incoming_call_sms() {
             digitalWrite(power, HIGH);
             sms("RELAY ON OK", (val.indexOf(MASTER) > -1) ? MASTER : MASTER2);
             state = true;
-            digitalWrite(LED, state);
+            digitalWrite(STAT_LED, state);
             EEPROM.update(1, state);
             timer = 0;
             EEPROM.update(2, 1);
@@ -345,7 +357,7 @@ void incoming_call_sms() {
             digitalWrite(power, LOW);
             sms("RELAY OFF OK", (val.indexOf(MASTER) > -1) ? MASTER : MASTER2);
             state = false;
-            digitalWrite(LED, state);
+            digitalWrite(STAT_LED, state);
             EEPROM.update(1, state);
             timer = 0;
             EEPROM.update(2, 1);
@@ -358,7 +370,7 @@ void incoming_call_sms() {
                 if (timer != 0) {
                     digitalWrite(power, HIGH);
                     state = true;
-                    digitalWrite(LED, state);
+                    digitalWrite(STAT_LED, state);
                     EEPROM.update(1, state);
                     EEPROM.update(2, 0);
                     sms("TIMER ON " + timerTmp + " MIN", (val.indexOf(MASTER) > -1) ? MASTER : MASTER2);
@@ -374,10 +386,10 @@ void incoming_call_sms() {
         case CMD_TERMOSTAT:
             {
                 String heatTmp = val.substring(58);
-                heaterVal = heatTmp.toInt();
-                EEPROM.update(3, heaterVal);
-                if (heaterVal != 0) {
-                    sms("TERMOSTAT ON " + String(heaterVal) + "'C", (val.indexOf(MASTER) > -1) ? MASTER : MASTER2);
+                HEATERVal = heatTmp.toInt();
+                EEPROM.update(3, HEATERVal);
+                if (HEATERVal != 0) {
+                    sms("TERMOSTAT ON " + String(HEATERVal) + "'C", (val.indexOf(MASTER) > -1) ? MASTER : MASTER2);
                 }
                 val = "";
             }
@@ -405,7 +417,7 @@ void incoming_call_sms() {
                 delay(500);
                 state = !state;
                 digitalWrite(power, state ? HIGH : LOW);
-                digitalWrite(LED, state);
+                digitalWrite(STAT_LED, state);
                 EEPROM.update(1, state);
                 timer = 0;
                 EEPROM.update(2, 1);
