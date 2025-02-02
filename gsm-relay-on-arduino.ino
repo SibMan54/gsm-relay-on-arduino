@@ -8,33 +8,53 @@
 
 SoftwareSerial mySerial(A2, A3);  // RX, TX программного порта
 
-// #define USE_readNumberSIM  // Раскоментировать для считывания номера из SIM карты
-// #define USE_TERMOSTAT      // Раскоментировать для включения самоподогрева
-#define USE_TIMER  // Закомментировать, если не нужен таймер
+// #define USE_readNumberSIM    // Раскоментировать для считывания номера из SIM карты
+// #define USE_HEATING          // Раскоментировать для включения самоподогрева
+#define USE_TIMER            // Закомментировать, если не нужен таймер
 
 //---------КОНТАКТЫ--------------
-#define POWER 2       // Реле питания
-#define STAT_LED 3    // Светодиод состояния
-#define BUTTON 4      // Кнопка управления
-#define HEATER 6      // Подогреватель
-#define DS18B20 7     // Датчик температуры
-#define DS_POWER_MODE 1 // Режим питания датчика
+#define POWER 2                 // Реле питания
+#define STAT_LED 3              // Светодиод состояния
+#define BUTTON 4                // Кнопка управления
+#define HEATER 6                // Подогреватель
+#define DS18B20 7               // Датчик температуры
+#define DS_POWER_MODE 1         // Режим питания датчика
 OneWire sensDs(DS18B20);
-//---------------------------------
-String MASTER = "79123456789";  // Основной мастер-номер
-String MASTER2 = "79123456789"; // Второй мастер-номер
-bool state = false;  // Текущее состояние реле
-#ifdef USE_TIMER
-uint32_t timer = 0;  // Таймер работы реле
-uint32_t curTime;
-#endif
-byte bufData[9];  // Буфер данных для термодатчика
-#ifdef USE_TERMOSTAT
-bool tmpFlag;
-int8_t HEATERVal;
-#endif
 
+//---------ПЕРЕМЕННЫЕ И КОНСТАНТЫ--------------
+const String MASTER = "79123456789";  // Основной мастер-номер
+const String MASTER2 = "79123456789"; // Доп. мастер-номер
+String val = "";
+bool state = false;             // Текущее состояние реле
+byte bufData[9];                // Буфер данных для термодатчика
+#ifdef USE_TIMER
+uint32_t timer = 0;             // Таймер работы реле
+#endif
+#ifdef USE_HEATING
+int8_t heaterVal = 1;               // Состояние самоподогрева
+#endif
 volatile unsigned long lastPressTime = 0; // Переменная для защиты от дребезга
+
+//---------АДРЕСА В EEPROM--------------
+#define STAT_ADDR 1
+#define TIMER_ADDR 2
+#define HEAT_ADDR 3
+
+enum Command {
+    CMD_RELAY_ON,
+    CMD_RELAY_OFF,
+    CMD_TIMER,
+    CMD_TIMER_OFF,
+    CMD_HEATING,
+    CMD_HEATING_OFF,
+    CMD_TEMPERATURE,
+    CMD_NEW_MASTER,
+    CMD_NEW_MASTER2,
+    CMD_SIM_MASTER,
+    CMD_DELETE_SMS,
+    CMD_RING,
+    CMD_UNKNOWN
+};
 
 //--------------------------------------------------------------
 // Функция отправки команды модему
@@ -51,6 +71,18 @@ bool sendAtCmd(String at_send, String ok_answer = "OK", uint16_t wait_sec = 2) {
   }
   return false;
 }
+/*
+bool sendATCommand(const char* command, const char* expectedResponse, unsigned long timeout = 2000) {
+  mySerial.println(command);
+  unsigned long startTime = millis();
+  while (millis() - startTime < timeout) {
+    if (mySerial.find(expectedResponse)) {
+      return true;
+    }
+  }
+  return false;
+}
+*/
 
 //--------------------------------------------------------------
 // Инициализация GSM модема
@@ -68,12 +100,54 @@ void initGSM() {
 // Обработчик прерывания кнопки с защитой от дребезга
 //--------------------------------------------------------------
 void buttonISR() {
-  unsigned long currentTime = millis();
+  uint32_t currentTime = millis();
   if (currentTime - lastPressTime > 200) {  // 200 мс защита от дребезга
     switchRelay(!state);
     lastPressTime = currentTime;
   }
 }
+
+//---------------------------------------------------
+// Процедура отправки СМС
+//---------------------------------------------------
+void sms(String text, String phone)
+{
+  mySerial.println("AT+CMGS=\"+" + phone + "\"");
+  delay(500);
+  mySerial.print(text);
+  delay(500);
+  mySerial.print((char)26);
+  delay(5000);
+}
+
+//--------------------------------------------------------------
+// Чтение номера из СИМ
+//--------------------------------------------------------------
+#ifdef USE_readNumberSIM
+void readNumberSIM() {
+  byte ch = 0;
+  byte x = 0;
+  while (mySerial.available()) mySerial.read();
+  delay(100);
+  mySerial.println("AT+CPBF=\"MASTER\"");     //чтение номера из СИМ
+  delay(300);
+  while (mySerial.available()) {         //сохраняем входную строку в переменную val
+    ch = mySerial.read();
+    x++;
+    if((x > 30) && (x < 42)) {
+      val += char(ch);
+      delay(5);
+    }
+   }
+   if (val.indexOf("79") > -1 && val.length() == 11) {
+     MASTER = val;
+   }
+
+   ch = 0;
+   val = "";
+   update_master_eeprom(10);
+}
+#endif
 
 //--------------------------------------------------------------
 // Чтение номера из EEPROM
@@ -97,7 +171,7 @@ void update_eeprom_number(int addr, String num) {
 void switchRelay(bool newState) {
   digitalWrite(POWER, newState);
   digitalWrite(STAT_LED, newState);
-  EEPROM.update(1, newState);
+  EEPROM.update(STAT_ADDR, newState);
   state = newState;
 }
 
@@ -122,24 +196,24 @@ float currentTemper() {
 //--------------------------------------------------------------
 #ifdef USE_TIMER
 void timerControl() {
-  if (timer != 0 && millis() >= timer) {
+  if (timer = 0 || millis() >= timer) {
     switchRelay(false);
     timer = 0;
-    EEPROM.update(2, 1);
+    EEPROM.update(TIMER_ADDR, false);
   }
 }
 #endif
 
 //--------------------------------------------------------------
-// Функция управления подогревом
+// Функция управления самоподогревом
 //--------------------------------------------------------------
-#ifdef USE_TERMOSTAT
+#ifdef USE_HEATING
 void heaterControl() {
-  float temp = currentTemper();
-  if (temp < HEATERVal) {
-    digitalWrite(HEATER, HIGH);
-  } else {
-    digitalWrite(HEATER, LOW);
+  static uint32_t lastCheck = 0;
+  if (millis() - lastCheck >= 10000) {  // проверка температуры раз в 10 сек
+    lastCheck = millis();
+    float temp = currentTemper();
+    digitalWrite(HEATER, temp < heaterVal ? HIGH : LOW);
   }
 }
 #endif
@@ -153,19 +227,20 @@ void setup() {
   pinMode(BUTTON, INPUT_PULLUP);
   pinMode(HEATER, OUTPUT);
 
-  attachInterrupt(digitalPinToInterrupt(BUTTON), buttonISR, FALLING);
+  attachInterrupt(digitalPinToInterrupt(BUTTON), buttonISR, FALLING); // Настройка аппаратного прерывания
 
   mySerial.begin(9600);
   initGSM();
 
-  if (EEPROM.read(2)) {
-    state = EEPROM.read(1);
-    switchRelay(state);
-  } else {
-    EEPROM.update(1, state);
-    EEPROM.update(2, 1);
-  }
-  digitalWrite(STAT_LED, HIGH);
+  state = EEPROM.read(STAT_ADDR);
+  switchRelay(state);
+  digitalWrite(STAT_LED, state);
+  #ifdef USE_TIMER
+  timer = EEPROM.read(TIMER_ADDR);
+  #endif
+  #ifdef USE_HEATING
+  heaterVal = EEPROM.read(HEAT_ADDR);
+  #endif
 
   MASTER = read_eeprom_number(10);
   MASTER2 = read_eeprom_number(30);
@@ -176,11 +251,11 @@ void setup() {
 //--------------------------------------------------------------
 void loop() {
   if (mySerial.available()) incoming_call_sms();
-  #ifdef USE_TERMOSTAT
-  heaterControl();
+  #ifdef USE_HEATING
+  if(heaterVal<1) heaterControl();
   #endif
   #ifdef USE_TIMER
-  timerControl();
+  if(timer!=0) timerControl();
   #endif
 }
 
@@ -188,19 +263,6 @@ void loop() {
 //-----------------------------------------------------------------------------
 // Процедура обработки звонков и смс
 //-----------------------------------------------------------------------------
-enum Command {
-    CMD_DELETE_SMS,
-    CMD_RELAY_ON,
-    CMD_RELAY_OFF,
-    CMD_TIMER,
-    CMD_TEMPERATURE,
-    CMD_TERMOSTAT,
-    CMD_NEW_MASTER,
-    CMD_NEW_MASTER2,
-    CMD_SIM_MASTER,
-    CMD_RING,
-    CMD_UNKNOWN
-};
 
 Command getCommand(const String& val) {
     if (val.indexOf("+CMT") > -1) {
@@ -208,8 +270,10 @@ Command getCommand(const String& val) {
         if ((val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1) && val.indexOf("relay on") > -1 && !state) return CMD_RELAY_ON;
         if ((val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1) && val.indexOf("relay off") > -1 && state) return CMD_RELAY_OFF;
         if ((val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1) && val.indexOf("timer ") > -1) return CMD_TIMER;
+        if ((val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1) && val.indexOf("timer off") > -1) return CMD_TIMER_OFF;
+        if ((val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1) && val.indexOf("heating ") > -1) return CMD_HEATING;
+        if ((val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1) && val.indexOf("heating off") > -1) return CMD_HEATING_OFF;
         if ((val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1) && val.indexOf("temper") > -1) return CMD_TEMPERATURE;
-        if ((val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1) && val.indexOf("termostat ") > -1) return CMD_TERMOSTAT;
         if (val.indexOf("new master") > -1) return CMD_NEW_MASTER;
         if (val.indexOf("new master2") > -1) return CMD_NEW_MASTER2;
         if (val.indexOf("SIM master N") > -1) return CMD_SIM_MASTER;
@@ -248,13 +312,13 @@ void incoming_call_sms() {
             break;
         case CMD_NEW_MASTER:
             MASTER = val.substring(10, 21);
-            update_master_eeprom(10);
+            update_eeprom_number(10,MASTER);
             sms("Master Nomer izmenen", MASTER);
             break;
         case CMD_NEW_MASTER2:
             MASTER2 = val.substring(10, 21);
-            update_master2_eeprom(30);
-            sms("Master Nomer izmenen", MASTER2);
+            update_eeprom_number(30,MASTER2);
+            sms("Master2 Nomer izmenen", MASTER2);
             break;
 #ifdef USE_readNumberSIM
         case CMD_SIM_MASTER:
@@ -270,24 +334,39 @@ void incoming_call_sms() {
                 timer = timerTmp.toInt() * 60000 + millis();
                 if (timer != 0) {
                     switchRelay(true);
-                    EEPROM.update(2, 0);
+                    EEPROM.update(TIMER_ADDR, true);
                     sms("TIMER ON " + timerTmp + " MIN", (val.indexOf(MASTER) > -1) ? MASTER : MASTER2);
+                }
+                else {
+                    EEPROM.update(TIMER_ADDR, false);
+                    sms("TIMER OFF", (val.indexOf(MASTER) > -1) ? MASTER : MASTER2);
                 }
                 val = "";
             }
             break;
+        case CMD_TIMER_OFF:
+            timer = 0;
+            EEPROM.update(TIMER_ADDR, false);
+            sms("TIMER OFF OK", (val.indexOf(MASTER) > -1) ? MASTER : MASTER2);
+            break;
 #endif
-#ifdef USE_TERMOSTAT
-        case CMD_TERMOSTAT:
+#ifdef USE_HEATING
+        case CMD_HEATING:
             {
                 String heatTmp = val.substring(58);
                 heaterVal = heatTmp.toInt();
-                EEPROM.update(3, heaterVal);
-                if (heaterVal != 0) {
-                    sms("TERMOSTAT ON " + String(heaterVal) + "'C", (val.indexOf(MASTER) > -1) ? MASTER : MASTER2);
+                EEPROM.update(HEAT_ADDR, heaterVal);
+                if (heaterVal < 1) {
+                    sms("HEATING ON " + String(heaterVal) + "'C", (val.indexOf(MASTER) > -1) ? MASTER : MASTER2);
                 }
+                else sms("HEATING OFF, TEMP > +1 C", (val.indexOf(MASTER) > -1) ? MASTER : MASTER2);
                 val = "";
             }
+            break;
+        case CMD_HEATING_OFF:
+            heaterVal = 1;
+            EEPROM.update(HEAT_ADDR, heaterVal);
+            sms("HEATING OFF OK", (val.indexOf(MASTER) > -1) ? MASTER : MASTER2);
             break;
 #endif
         case CMD_RING:
