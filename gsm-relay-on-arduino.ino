@@ -12,6 +12,9 @@ SoftwareSerial mySerial(A2, A3);  // RX, TX программного порта
 // #define USE_HEATING          // Раскоментировать для включения самоподогрева
 #define USE_TIMER            // Закомментировать, если не нужен таймер
 
+#define CHECK_NUMBER (val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1)
+#define NUMBER_TO_SEND (val.indexOf(MASTER) > -1) ? MASTER : MASTER2)
+
 //---------КОНТАКТЫ--------------
 #define POWER 2                 // Реле питания
 #define STAT_LED 3              // Светодиод состояния
@@ -42,13 +45,14 @@ volatile uint8_t int0Flag=false;       // Флаг прерывания по н�
 #define HEAT_ADDR 3
 
 enum Command {
+    CMD_STATUS,
+    CMD_TEMPERATURE,
     CMD_RELAY_ON,
     CMD_RELAY_OFF,
     CMD_TIMER,
     CMD_TIMER_OFF,
     CMD_HEATING,
     CMD_HEATING_OFF,
-    CMD_TEMPERATURE,
     CMD_NEW_MASTER,
     CMD_NEW_MASTER2,
     CMD_SIM_MASTER,
@@ -89,12 +93,18 @@ bool sendATCommand(const char* command, const char* expectedResponse, unsigned l
 // Инициализация GSM модема
 //--------------------------------------------------------------
 void initGSM() {
-  sendAtCmd("AT+IPR=9600");
-  sendAtCmd("AT+CLIP=1");
-  sendAtCmd("AT+CMGF=1");
-  sendAtCmd("AT+CSCS=\"GSM\"");
-  sendAtCmd("AT+CNMI=2,2");
-  sendAtCmd("AT+CMGD=1,4");
+  sendAtCmd("AT+IPR=9600");                 // команда модему на установку скорости
+  sendAtCmd("AT+CLIP=1");                   // включаем АОН
+  sendAtCmd("AT+CMGF=1");                   // режим кодировки СМС - обычный (для англ.)
+  sendAtCmd("AT+CSCS=\"GSM\"");             // режим кодировки текста
+  sendAtCmd("AT+CNMI=2,2");                 // отображение смс в терминале сразу после приема (без этого сообщения молча падают в память)
+  do {
+    sendAtCmd("AT+CSQ");  // Запрашиваем уровень сигнала (если 99, то связи нет)
+    digitalWrite(STAT_LED, !digitalRead(STAT_LED));  // Мигание светодиодом
+    delay(250);
+  } while (!mySerial.find("+PBREADY") || mySerial.find("+CSQ: 99"));  // Проверяем статус соединения
+  digitalWrite(STAT_LED, false);            // гасим Светодиод
+  sendAtCmd("AT+CMGD=1,4");                 // стереть все старые сообщения
 }
 
 //--------------------------------------------------------------
@@ -108,7 +118,7 @@ void buttonISR() {
 //---------------------------------------------------
 // Процедура отправки СМС
 //---------------------------------------------------
-void sms(String text, String phone)
+void sendSMS(String text, String phone)
 {
   mySerial.println("AT+CMGS=\"+" + phone + "\"");
   delay(500);
@@ -240,8 +250,12 @@ void setup() {
   heaterVal = EEPROM.read(HEAT_ADDR);
   #endif
 
-  MASTER = read_eeprom_number(10);
-  MASTER2 = read_eeprom_number(30);
+  if (read_eeprom_number(10).indexOf("79") > -1 && read_eeprom_number(10).length() == 11) {
+    MASTER = read_eeprom_number(10);
+  }
+  if (read_eeprom_number(30).indexOf("79") > -1 && read_eeprom_number(30).length() == 11) {
+    MASTER2 = read_eeprom_number(30);
+  }
 }
 
 //--------------------------------------------------------------
@@ -269,14 +283,15 @@ void loop() {
 
 Command getCommand(const String& val) {
     if (val.indexOf("+CMT") > -1) {
-        if ((val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1) && val.indexOf("delete sms") > -1) return CMD_DELETE_SMS;
-        if ((val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1) && val.indexOf("relay on") > -1 && !state) return CMD_RELAY_ON;
-        if ((val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1) && val.indexOf("relay off") > -1 && state) return CMD_RELAY_OFF;
-        if ((val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1) && val.indexOf("timer ") > -1) return CMD_TIMER;
-        if ((val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1) && val.indexOf("timer off") > -1) return CMD_TIMER_OFF;
-        if ((val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1) && val.indexOf("heating ") > -1) return CMD_HEATING;
-        if ((val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1) && val.indexOf("heating off") > -1) return CMD_HEATING_OFF;
-        if ((val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1) && val.indexOf("temper") > -1) return CMD_TEMPERATURE;
+        if (CHECK_NUMBER && val.indexOf("delete sms") > -1) return CMD_DELETE_SMS;
+        if (CHECK_NUMBER && val.indexOf("relay on") > -1 && !state) return CMD_RELAY_ON;
+        if (CHECK_NUMBER && val.indexOf("relay off") > -1 && state) return CMD_RELAY_OFF;
+        if (CHECK_NUMBER && val.indexOf("timer ") > -1) return CMD_TIMER;
+        if (CHECK_NUMBER && val.indexOf("timer off") > -1) return CMD_TIMER_OFF;
+        if (CHECK_NUMBER && val.indexOf("heating ") > -1) return CMD_HEATING;
+        if (CHECK_NUMBER && val.indexOf("heating off") > -1) return CMD_HEATING_OFF;
+        if (CHECK_NUMBER && val.indexOf("temper") > -1) return CMD_TEMPERATURE;
+        if (CHECK_NUMBER && val.indexOf("status") > -1) return CMD_STATUS;
         if (val.indexOf("new master") > -1) return CMD_NEW_MASTER;
         if (val.indexOf("new master2") > -1) return CMD_NEW_MASTER2;
         if (val.indexOf("SIM master N") > -1) return CMD_SIM_MASTER;
@@ -296,19 +311,22 @@ void incoming_call_sms() {
 
     Command cmd = getCommand(val);
     switch (cmd) {
+        case CMD_STATUS:
+            sendSMS("RELAY: " + String(state ? "ON" : "OFF") + ", TEMP: " + String(currentTemper()) + "'C", NUMBER_TO_SEND;
+            break;
+        case CMD_TEMPERATURE:
+            sendSMS("Temperature: " + String(currentTemper()) + "'C", NUMBER_TO_SEND;
+            break;
         case CMD_RELAY_ON:
             switchRelay(true);
-            sms("RELAY ON OK", (val.indexOf(MASTER) > -1) ? MASTER : MASTER2);
+            sendSMS("RELAY ON OK", NUMBER_TO_SEND;
             break;
         case CMD_RELAY_OFF:
             switchRelay(false);
-            sms("RELAY OFF OK", (val.indexOf(MASTER) > -1) ? MASTER : MASTER2);
-            break;
-        case CMD_TEMPERATURE:
-            sms("Temperature: " + String(currentTemper()) + "'C", (val.indexOf(MASTER) > -1) ? MASTER : MASTER2);
+            sendSMS("RELAY OFF OK", NUMBER_TO_SEND;
             break;
         case CMD_DELETE_SMS:
-            sms("Delete SMS OK", (val.indexOf(MASTER) > -1) ? MASTER : MASTER2);
+            sendSMS("Delete SMS OK", NUMBER_TO_SEND;
             val = "";
             delay(1000);
             sendAtCmd("AT+CMGD=1,4");
@@ -316,18 +334,18 @@ void incoming_call_sms() {
         case CMD_NEW_MASTER:
             MASTER = val.substring(10, 21);
             update_eeprom_number(10,MASTER);
-            sms("Master Nomer izmenen", MASTER);
+            sendSMS("Master Nomer izmenen", MASTER);
             break;
         case CMD_NEW_MASTER2:
             MASTER2 = val.substring(10, 21);
             update_eeprom_number(30,MASTER2);
-            sms("Master2 Nomer izmenen", MASTER2);
+            sendSMS("Master2 Nomer izmenen", MASTER2);
             break;
 #ifdef USE_readNumberSIM
         case CMD_SIM_MASTER:
             val = "";
             readNumberSIM();
-            sms("Master Nomer izmenen", MASTER);
+            sendSMS("Master Nomer izmenen", MASTER);
             break;
 #endif
 #ifdef USE_TIMER
@@ -338,11 +356,11 @@ void incoming_call_sms() {
                 if (timer != 0) {
                     switchRelay(true);
                     EEPROM.update(TIMER_ADDR, true);
-                    sms("TIMER ON " + timerTmp + " MIN", (val.indexOf(MASTER) > -1) ? MASTER : MASTER2);
+                    sendSMS("TIMER ON " + timerTmp + " MIN", NUMBER_TO_SEND;
                 }
                 else {
                     EEPROM.update(TIMER_ADDR, false);
-                    sms("TIMER OFF", (val.indexOf(MASTER) > -1) ? MASTER : MASTER2);
+                    sendSMS("TIMER OFF", NUMBER_TO_SEND;
                 }
                 val = "";
             }
@@ -350,7 +368,7 @@ void incoming_call_sms() {
         case CMD_TIMER_OFF:
             timer = 0;
             EEPROM.update(TIMER_ADDR, false);
-            sms("TIMER OFF OK", (val.indexOf(MASTER) > -1) ? MASTER : MASTER2);
+            sendSMS("TIMER OFF OK", NUMBER_TO_SEND;
             break;
 #endif
 #ifdef USE_HEATING
@@ -360,20 +378,20 @@ void incoming_call_sms() {
                 heaterVal = heatTmp.toInt();
                 EEPROM.update(HEAT_ADDR, heaterVal);
                 if (heaterVal < 1) {
-                    sms("HEATING ON " + String(heaterVal) + "'C", (val.indexOf(MASTER) > -1) ? MASTER : MASTER2);
+                    sendSMS("HEATING ON " + String(heaterVal) + "'C", NUMBER_TO_SEND;
                 }
-                else sms("HEATING OFF, TEMP > +1 C", (val.indexOf(MASTER) > -1) ? MASTER : MASTER2);
+                else sendSMS("HEATING OFF, TEMP > +1 C", NUMBER_TO_SEND;
                 val = "";
             }
             break;
         case CMD_HEATING_OFF:
             heaterVal = 1;
             EEPROM.update(HEAT_ADDR, heaterVal);
-            sms("HEATING OFF OK", (val.indexOf(MASTER) > -1) ? MASTER : MASTER2);
+            sendSMS("HEATING OFF OK", NUMBER_TO_SEND;
             break;
 #endif
         case CMD_RING:
-            if (val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1) {
+            if CHECK_NUMBER {
                 delay(500);
                 switchRelay(!state);
                 sendAtCmd("ATH0");
