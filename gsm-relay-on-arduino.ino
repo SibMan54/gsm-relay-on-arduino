@@ -6,43 +6,45 @@
 #include <SoftwareSerial.h>
 #include <OneWire.h>
 
-SoftwareSerial mySerial(A2, A3);  // RX, TX программного порта
-
-// #define USE_readNumberSIM    // Раскоментировать для считывания номера из SIM карты
-// #define USE_HEATING          // Раскоментировать для включения самоподогрева
-#define USE_TIMER            // Закомментировать, если не нужен таймер
-
-#define CHECK_NUMBER (val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1)
-#define NUMBER_TO_SEND (val.indexOf(MASTER) > -1) ? MASTER : MASTER2)
+//---------НАСТРОЙКА--------------
+#define DS_POWER_MODE 1             // Режим питания датчика
+#define USE_TIMER                   // Закомментировать, если не нужен таймер
+// #define USE_readNumberSIM        // Раскоментировать для считывания номера из SIM карты
+// #define USE_HEATING              // Раскоментировать для включения самоподогрева
+#define DEF_NUM "79123456789"       // Основной дефолтный мастер-номер
+#define DEF_NUM_2 "79123456789";    // Второй дефолтный мастер-номер
 
 //---------КОНТАКТЫ--------------
-#define POWER 2                 // Реле питания
-#define STAT_LED 3              // Светодиод состояния
-#define BUTTON 4                // Кнопка управления
-#define HEATER 6                // Подогреватель
-#define DS18B20 7               // Датчик температуры
-#define DS_POWER_MODE 1         // Режим питания датчика
-OneWire sensDs(DS18B20);
+SoftwareSerial mySerial(A2, A3);    // RX, TX программного порта
+#define POWER 12                    // Реле питания
+#define STAT_LED 13                 // Светодиод состояния
+#define BUTTON 2                    // Кнопка управления
+#define HEATER 6                    // Подогреватель
+#define DS18B20 7                   // Датчик температуры
+OneWire sensDs(DS18B20);            // Инициализация шины 1-Wire для работы датчика
 
-//---------ПЕРЕМЕННЫЕ И КОНСТАНТЫ--------------
-const String MASTER = "79123456789";  // Основной мастер-номер
-const String MASTER2 = "79123456789"; // Доп. мастер-номер
+//---------ПЕРЕМЕННЫЕ--------------
+String MASTER = read_eeprom_number(10);       // Основной мастер-номер
+String MASTER2 = read_eeprom_number(30);      // Второй мастер-номер
 String val = "";
-bool state = false;             // Текущее состояние реле
-byte bufData[9];                // Буфер данных для термодатчика
+bool state = false;                     // Текущее состояние реле
+byte bufData[9];                        // Буфер данных для термодатчика
 #ifdef USE_TIMER
-uint32_t timer = 0;             // Таймер работы реле
+uint32_t timer = 0;                     // Таймер работы реле
 #endif
 #ifdef USE_HEATING
 int8_t heaterVal = 1;                   // Состояние самоподогрева
 #endif
 volatile uint32_t lastPressTime = 0;    // Переменная для защиты от дребезга
-volatile uint8_t int0Flag=false;       // Флаг прерывания по нажатию кнопки
+volatile uint8_t int0Flag=false;        // Флаг прерывания по нажатию кнопки
 
 //---------АДРЕСА В EEPROM--------------
 #define STAT_ADDR 1
 #define TIMER_ADDR 2
 #define HEAT_ADDR 3
+
+#define CHECK_NUMBER (val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1)
+#define NUMBER_TO_SEND (val.indexOf(MASTER) > -1) ? MASTER : MASTER2)
 
 enum Command {
     CMD_STATUS,
@@ -161,9 +163,22 @@ void readNumberSIM() {
 // Чтение номера из EEPROM
 //--------------------------------------------------------------
 String read_eeprom_number(int addr) {
-  String number = "";
-  for (byte i = 0; i < 12; i++) number += char(EEPROM.read(addr + i));
-  return number;
+    String num = "";
+    char ch;
+
+    for (int i = 0; i < 11; i++) {  // Читаем до 11 символов
+        ch = EEPROM.read(addr + i);
+        if (ch == '\0' || ch == 0xFF) break;  // Останавливаемся, если пусто
+        num += ch;
+    }
+
+    // Проверяем, корректен ли номер
+    if (num.length() == 11 && num.startsWith("79")) {
+        return num;  // Если номер правильный, возвращаем его
+    }
+
+    if (addr == 10) return DEF_NUM;   // Возвращаем дефолтный номер 1
+    else return DEF_NUM_2;            // возвращаем дефолтный номер 2
 }
 
 //--------------------------------------------------------------
@@ -249,13 +264,6 @@ void setup() {
   #ifdef USE_HEATING
   heaterVal = EEPROM.read(HEAT_ADDR);
   #endif
-
-  if (read_eeprom_number(10).indexOf("79") > -1 && read_eeprom_number(10).length() == 11) {
-    MASTER = read_eeprom_number(10);
-  }
-  if (read_eeprom_number(30).indexOf("79") > -1 && read_eeprom_number(30).length() == 11) {
-    MASTER2 = read_eeprom_number(30);
-  }
 }
 
 //--------------------------------------------------------------
@@ -312,7 +320,7 @@ void incoming_call_sms() {
     Command cmd = getCommand(val);
     switch (cmd) {
         case CMD_STATUS:
-            sendSMS("RELAY: " + String(state ? "ON" : "OFF") + ", TEMP: " + String(currentTemper()) + "'C", NUMBER_TO_SEND;
+            sendSMS("RELAY: " + String(state ? "ON" : "OFF") + ", TEMP: " + String(currentTemper()) + "'C" + "NUM1: " + MASTER + "NUM2: " + MASTER2, NUMBER_TO_SEND;
             break;
         case CMD_TEMPERATURE:
             sendSMS("Temperature: " + String(currentTemper()) + "'C", NUMBER_TO_SEND;
@@ -334,18 +342,18 @@ void incoming_call_sms() {
         case CMD_NEW_MASTER:
             MASTER = val.substring(10, 21);
             update_eeprom_number(10,MASTER);
-            sendSMS("Master Nomer izmenen", MASTER);
+            sendSMS("Osnovnoi nomer izmenen na: " + MASTER, MASTER);
             break;
         case CMD_NEW_MASTER2:
             MASTER2 = val.substring(10, 21);
             update_eeprom_number(30,MASTER2);
-            sendSMS("Master2 Nomer izmenen", MASTER2);
+            sendSMS("Vtoroi nomer izmenen na: " + MASTER2, MASTER2);
             break;
 #ifdef USE_readNumberSIM
         case CMD_SIM_MASTER:
             val = "";
             readNumberSIM();
-            sendSMS("Master Nomer izmenen", MASTER);
+            sendSMS("Osnovnoi nomer izmenen na: " + MASTER, MASTER);
             break;
 #endif
 #ifdef USE_TIMER
