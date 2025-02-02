@@ -31,9 +31,10 @@ byte bufData[9];                // Буфер данных для термода
 uint32_t timer = 0;             // Таймер работы реле
 #endif
 #ifdef USE_HEATING
-int8_t heaterVal = 1;               // Состояние самоподогрева
+int8_t heaterVal = 1;                   // Состояние самоподогрева
 #endif
-volatile unsigned long lastPressTime = 0; // Переменная для защиты от дребезга
+volatile uint32_t lastPressTime = 0;    // Переменная для защиты от дребезга
+volatile uint8_t int0Flag=false;       // Флаг прерывания по нажатию кнопки
 
 //---------АДРЕСА В EEPROM--------------
 #define STAT_ADDR 1
@@ -100,11 +101,8 @@ void initGSM() {
 // Обработчик прерывания кнопки с защитой от дребезга
 //--------------------------------------------------------------
 void buttonISR() {
-  uint32_t currentTime = millis();
-  if (currentTime - lastPressTime > 200) {  // 200 мс защита от дребезга
-    switchRelay(!state);
-    lastPressTime = currentTime;
-  }
+  int0Flag=true;
+  lastPressTime = millis();
 }
 
 //---------------------------------------------------
@@ -251,6 +249,11 @@ void setup() {
 //--------------------------------------------------------------
 void loop() {
   if (mySerial.available()) incoming_call_sms();
+  if(int0Flag==true && (millis() - lastPressTime > 200)) {
+    switchRelay(!state);
+    int0Flag=false;
+    lastPressTime = 0;
+  }
   #ifdef USE_HEATING
   if(heaterVal<1) heaterControl();
   #endif
