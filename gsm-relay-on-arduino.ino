@@ -6,6 +6,12 @@
 #include <SoftwareSerial.h>
 #include <OneWire.h>
 
+String read_eeprom_number(int addr);  // Объявление прототипа
+
+//---------Выбор модема--------------
+#define USE_M590    // Раскомментируйте для использования NEOWAY M590
+// #define USE_SIM800 // Раскомментируйте для использования SIM800
+
 //---------НАСТРОЙКА--------------
 #define DS_POWER_MODE 1             // Режим питания датчика
 #define USE_TIMER                   // Закомментировать, если не нужен таймер
@@ -13,16 +19,10 @@
 // #define USE_HEATING              // Раскоментировать для включения самоподогрева
 #define DEF_NUM "79123456789"       // Основной дефолтный мастер-номер
 #define DEF_NUM_2 "79123456789";    // Второй дефолтный мастер-номер
-#define USE_NEWLINE 1  // 1 - `\n`, 2 - `\r\n`
-
-#if USE_NEWLINE == 1
-  #define LINE_BREAK "\n"
-#elif USE_NEWLINE == 2
-  #define LINE_BREAK "\r\n"
-#endif
+#define LINE_BREAK "\n"  // или "\r\n" (Тип переноса строки в СМС)
 
 //---------КОНТАКТЫ--------------
-SoftwareSerial mySerial(A2, A3);    // RX, TX программного порта
+SoftwareSerial mySerial(10, 11);    // RX, TX для для связи с модемом
 #define POWER 12                    // Реле питания
 #define STAT_LED 13                 // Светодиод состояния
 #define BUTTON 2                    // Кнопка управления
@@ -51,7 +51,7 @@ volatile uint8_t int0Flag=false;        // Флаг прерывания по н
 #define HEAT_ADDR 3
 
 #define CHECK_NUMBER (val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1)
-#define NUMBER_TO_SEND (val.indexOf(MASTER) > -1) ? MASTER : MASTER2)
+#define NUMBER_TO_SEND (val.indexOf(MASTER) > -1) ? MASTER : MASTER2
 
 enum Command {
     CMD_STATUS,
@@ -76,32 +76,30 @@ enum Command {
 bool sendAtCmd(String at_send, String ok_answer = "OK", uint16_t wait_sec = 2) {
   mySerial.println(at_send);
   uint32_t exit_ms = millis() + wait_sec * 1000;
-  String answer;
+  String answer = "";
+  
   while (millis() < exit_ms) {
-    if (mySerial.available()) {
-      answer = mySerial.readString();
+    while (mySerial.available()) {
+      char c = mySerial.read();
+      answer += c;
+
+      // Обрезаем лишние символы (если в ответе есть \r\nOK\r\n)
+      answer.trim();  
+
       if (answer.indexOf(ok_answer) > -1) return true;
     }
   }
   return false;
 }
-/*
-bool sendATCommand(const char* command, const char* expectedResponse, unsigned long timeout = 2000) {
-  mySerial.println(command);
-  unsigned long startTime = millis();
-  while (millis() - startTime < timeout) {
-    if (mySerial.find(expectedResponse)) {
-      return true;
-    }
-  }
-  return false;
-}
-*/
 
 //--------------------------------------------------------------
 // Инициализация GSM модема
 //--------------------------------------------------------------
-void initGSM() {
+void initModem() {
+    mySerial.begin(9600);
+    delay(1000);
+
+#ifdef USE_M590
   sendAtCmd("AT+IPR=9600");                 // команда модему на установку скорости
   sendAtCmd("AT+CLIP=1");                   // включаем АОН
   sendAtCmd("AT+CMGF=1");                   // режим кодировки СМС - обычный (для англ.)
@@ -114,6 +112,14 @@ void initGSM() {
   } while (!mySerial.find("+PBREADY") || mySerial.find("+CSQ: 99"));  // Проверяем статус соединения
   digitalWrite(STAT_LED, false);            // гасим Светодиод
   sendAtCmd("AT+CMGD=1,4");                 // стереть все старые сообщения
+#endif
+
+#ifdef USE_SIM800
+    sendAtCmd("AT");
+    sendAtCmd("AT+CMGF=1");
+    sendAtCmd("AT+CNMI=1,2,0,0,0"); // Настройка приема SMS
+    sendAtCmd("AT+CSMP=17,167,0,0"); // Настройка кодировки SMS
+#endif
 }
 
 //--------------------------------------------------------------
@@ -259,8 +265,8 @@ void setup() {
 
   attachInterrupt(digitalPinToInterrupt(BUTTON), buttonISR, FALLING); // Настройка аппаратного прерывания
 
-  mySerial.begin(9600);
-  initGSM();
+  Serial.begin(9600);
+  initModem();
 
   state = EEPROM.read(STAT_ADDR);
   switchRelay(state);
@@ -333,18 +339,18 @@ void incoming_call_sms() {
                     "NUM2: " + MASTER2, NUMBER_TO_SEND);
             break;
         case CMD_TEMPERATURE:
-            sendSMS("Temperature: " + String(currentTemper()) + "'C", NUMBER_TO_SEND;
+            sendSMS("Temperature: " + String(currentTemper()) + "'C", NUMBER_TO_SEND);
             break;
         case CMD_RELAY_ON:
             switchRelay(true);
-            sendSMS("RELAY ON OK", NUMBER_TO_SEND;
+            sendSMS("RELAY ON OK", NUMBER_TO_SEND);
             break;
         case CMD_RELAY_OFF:
             switchRelay(false);
-            sendSMS("RELAY OFF OK", NUMBER_TO_SEND;
+            sendSMS("RELAY OFF OK", NUMBER_TO_SEND);
             break;
         case CMD_DELETE_SMS:
-            sendSMS("Delete SMS OK", NUMBER_TO_SEND;
+            sendSMS("Delete SMS OK", NUMBER_TO_SEND);
             val = "";
             delay(1000);
             sendAtCmd("AT+CMGD=1,4");
@@ -374,11 +380,11 @@ void incoming_call_sms() {
                 if (timer != 0) {
                     switchRelay(true);
                     EEPROM.update(TIMER_ADDR, true);
-                    sendSMS("TIMER ON " + timerTmp + " MIN", NUMBER_TO_SEND;
+                    sendSMS("TIMER ON " + timerTmp + " MIN", NUMBER_TO_SEND);
                 }
                 else {
                     EEPROM.update(TIMER_ADDR, false);
-                    sendSMS("TIMER OFF", NUMBER_TO_SEND;
+                    sendSMS("TIMER OFF", NUMBER_TO_SEND);
                 }
                 val = "";
             }
@@ -386,7 +392,7 @@ void incoming_call_sms() {
         case CMD_TIMER_OFF:
             timer = 0;
             EEPROM.update(TIMER_ADDR, false);
-            sendSMS("TIMER OFF OK", NUMBER_TO_SEND;
+            sendSMS("TIMER OFF OK", NUMBER_TO_SEND);
             break;
 #endif
 #ifdef USE_HEATING
@@ -396,16 +402,16 @@ void incoming_call_sms() {
                 heaterVal = heatTmp.toInt();
                 EEPROM.update(HEAT_ADDR, heaterVal);
                 if (heaterVal < 1) {
-                    sendSMS("HEATING ON " + String(heaterVal) + "'C", NUMBER_TO_SEND;
+                    sendSMS("HEATING ON " + String(heaterVal) + "'C", NUMBER_TO_SEND);
                 }
-                else sendSMS("HEATING OFF, TEMP > +1 C", NUMBER_TO_SEND;
+                else sendSMS("HEATING OFF, TEMP > +1 C", NUMBER_TO_SEND);
                 val = "";
             }
             break;
         case CMD_HEATING_OFF:
             heaterVal = 1;
             EEPROM.update(HEAT_ADDR, heaterVal);
-            sendSMS("HEATING OFF OK", NUMBER_TO_SEND;
+            sendSMS("HEATING OFF OK", NUMBER_TO_SEND);
             break;
 #endif
         case CMD_RING:
