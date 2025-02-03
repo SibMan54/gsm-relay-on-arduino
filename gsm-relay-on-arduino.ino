@@ -13,6 +13,13 @@
 // #define USE_HEATING              // Раскоментировать для включения самоподогрева
 #define DEF_NUM "79123456789"       // Основной дефолтный мастер-номер
 #define DEF_NUM_2 "79123456789";    // Второй дефолтный мастер-номер
+#define USE_NEWLINE 1  // 1 - `\n`, 2 - `\r\n`
+
+#if USE_NEWLINE == 1
+  #define LINE_BREAK "\n"
+#elif USE_NEWLINE == 2
+  #define LINE_BREAK "\r\n"
+#endif
 
 //---------КОНТАКТЫ--------------
 SoftwareSerial mySerial(A2, A3);    // RX, TX программного порта
@@ -320,7 +327,10 @@ void incoming_call_sms() {
     Command cmd = getCommand(val);
     switch (cmd) {
         case CMD_STATUS:
-            sendSMS("RELAY: " + String(state ? "ON" : "OFF") + ", TEMP: " + String(currentTemper()) + "'C" + "NUM1: " + MASTER + "NUM2: " + MASTER2, NUMBER_TO_SEND;
+            sendSMS("RELAY: " + String(state ? "ON" : "OFF") + LINE_BREAK +
+                    "TEMP: " + String(currentTemper()) + "'C" + LINE_BREAK +
+                    "NUM1: " + MASTER + LINE_BREAK +
+                    "NUM2: " + MASTER2, NUMBER_TO_SEND);
             break;
         case CMD_TEMPERATURE:
             sendSMS("Temperature: " + String(currentTemper()) + "'C", NUMBER_TO_SEND;
