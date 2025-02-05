@@ -41,6 +41,7 @@ String MASTER = "79123456789";          // Основной мастер-ном�
 String MASTER2 = "79123456789";         // Второй мастер-номер
 String val = "";
 bool state = false;                     // Текущее состояние реле
+bool answerSMS = false;
 byte bufData[9];                        // Буфер данных для термодатчика
 #ifdef USE_TIMER
 uint32_t timer = 0;                     // Таймер работы реле
@@ -55,7 +56,9 @@ volatile uint8_t btnFlag=false;        // Флаг прерывания по н�
 #define STAT_ADDR 1
 #define TIMER_ADDR 2
 #define HEAT_ADDR 3
+#define ASMS_ADDR 4
 
+//---------СОКРАЦЕНИЯ--------------
 #define CHECK_NUMBER (val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1)
 #define NUMBER_TO_SEND (val.indexOf(MASTER) > -1) ? MASTER : MASTER2
 
@@ -68,6 +71,7 @@ enum Command {
     CMD_TIMER_OFF,
     CMD_HEATING,
     CMD_HEATING_OFF,
+    CMD_ANSWER_SMS,
     CMD_NEW_MASTER,
     CMD_NEW_MASTER2,
     CMD_SIM_MASTER,
@@ -92,7 +96,7 @@ bool sendAtCmd(String at_send, String ok_answer = "OK", uint16_t wait_sec = 2) {
       // Обрезаем лишние символы (если в ответе есть \r\nOK\r\n)
       answer.trim();
       if (answer.indexOf(ok_answer) > -1) {
-          DEBUG_PRINTLN("\nOK received!");  // Сообщаем, что получили подтверждение
+          // DEBUG_PRINTLN("\nOK received!");  // Сообщаем, что получили подтверждение
         return true;
       }
     }
@@ -361,6 +365,7 @@ Command getCommand(const String& val) {
         if (CHECK_NUMBER && val.indexOf("heating off") > -1) return CMD_HEATING_OFF;
         if (CHECK_NUMBER && val.indexOf("temper") > -1) return CMD_TEMPERATURE;
         if (CHECK_NUMBER && val.indexOf("status") > -1) return CMD_STATUS;
+        if (CHECK_NUMBER && val.indexOf("answer sms") > -1) return CMD_ANSWER_SMS;
         if (val.indexOf("new master") > -1) return CMD_NEW_MASTER;
         if (val.indexOf("new master2") > -1) return CMD_NEW_MASTER2;
         if (val.indexOf("sim master") > -1) return CMD_SIM_MASTER;
@@ -399,17 +404,23 @@ void incoming_call_sms() {
             break;
         case CMD_RELAY_ON:
             switchRelay(true);
-            sendSMS("RELAY ON OK", NUMBER_TO_SEND);
+            sendSMS("RELAY " + String(state ? "ON" : "OFF"), NUMBER_TO_SEND);
             break;
         case CMD_RELAY_OFF:
             switchRelay(false);
-            sendSMS("RELAY OFF OK", NUMBER_TO_SEND);
+            sendSMS("RELAY " + String(state ? "ON" : "OFF"), NUMBER_TO_SEND);
             break;
         case CMD_CLEAR:
             sendSMS("CLEAR OK", NUMBER_TO_SEND);
             delay(1000);
             sendAtCmd("AT+CMGD=1,4");
             DEBUG_PRINTLN("Память очищена");
+            break;
+        case CMD_ANSWER_SMS:
+            answerSMS = !answerSMS;
+            EEPROM.update(ASMS_ADDR, answerSMS);
+            sendSMS("ANSWER SMS: " + String(answerSMS ? "ON" : "OFF"), NUMBER_TO_SEND);
+            DEBUG_PRINTLN("Отправка ответных СМС: " + String(answerSMS ? "ON" : "OFF"));
             break;
         case CMD_NEW_MASTER:
             MASTER = val.substring(10, 21);
@@ -483,6 +494,9 @@ void incoming_call_sms() {
                 delay(500);
                 switchRelay(!state);
                 sendAtCmd("ATH0");
+                if (answerSMS) {
+                    sendSMS("RELAY " + String(state ? "ON" : "OFF"), NUMBER_TO_SEND);
+                }
             } else {
                 delay(10500);
                 sendAtCmd("ATH");
