@@ -6,10 +6,8 @@
 #include <SoftwareSerial.h>
 #include <OneWire.h>
 
-String read_eeprom_number(int addr);  // Объявление прототипа
-
 //---------ОТЛАДКА--------------
-#define DEBUG_ENABLE  // Раскомментируй, чтобы включить отладку
+// #define DEBUG_ENABLE                // Раскомментируй, чтобы включить отладку
 #ifdef DEBUG_ENABLE
   #define DEBUG_PRINTLN(x) Serial.println(x)
   #define DEBUG_PRINT(x) Serial.print(x)
@@ -27,8 +25,6 @@ String read_eeprom_number(int addr);  // Объявление прототипа
 #define USE_TIMER                   // Закомментировать, если не нужен таймер
 // #define USE_READ_NUM_SIM         // Раскоментировать для считывания номера из SIM карты
 // #define USE_HEATING              // Раскоментировать для включения самоподогрева
-#define DEF_NUM "79123456789"       // Основной дефолтный мастер-номер
-#define DEF_NUM_2 "79123456789";    // Второй дефолтный мастер-номер
 #define LINE_BREAK "\n"  // или "\r\n" (Тип переноса строки в СМС)
 
 //---------КОНТАКТЫ--------------
@@ -41,8 +37,8 @@ SoftwareSerial mySerial(10, 11);    // RX, TX для для связи с мод
 OneWire sensDs(DS18B20);            // Инициализация шины 1-Wire для работы датчика
 
 //---------ПЕРЕМЕННЫЕ--------------
-String MASTER = read_eeprom_number(10);       // Основной мастер-номер
-String MASTER2 = read_eeprom_number(30);      // Второй мастер-номер
+String MASTER = "79123456789";          // Основной мастер-номер
+String MASTER2 = "79123456789";         // Второй мастер-номер
 String val = "";
 bool state = false;                     // Текущее состояние реле
 byte bufData[9];                        // Буфер данных для термодатчика
@@ -108,15 +104,61 @@ bool sendAtCmd(String at_send, String ok_answer = "OK", uint16_t wait_sec = 2) {
 //--------------------------------------------------------------
 // Инициализация GSM модема
 //--------------------------------------------------------------
-void initModem() {
+bool initModem() {
     mySerial.begin(9600);
     delay(2000);
 
 #ifdef USE_M590
+    digitalWrite(STAT_LED, HIGH);  // Включаем светодиод при старте
+    DEBUG_PRINTLN("Ожидание готовности модема...");
 
+    while (!mySerial.find("PBREADY")) {  // Ждём сообщение "+PBREADY"
+        digitalWrite(STAT_LED, !digitalRead(STAT_LED));  // Мигание светодиодом
+        delay(500);
+    }
 
+    digitalWrite(STAT_LED, LOW);  // Готовность, выключаем светодиод
+    DEBUG_PRINTLN("Модем готов!");
 
+    if (sendAtCmd("AT+IPR=9600")) DEBUG_PRINTLN("Скорость 9600 задана");                    // команда модему на установку скорости
+    delay(1000);
+    if (sendAtCmd("AT+CLIP=1")) DEBUG_PRINTLN("АОН включен");                               // включаем АОН
+    if (sendAtCmd("AT+CMGF=1")) DEBUG_PRINTLN("Режим SMS установлен");                      // режим кодировки СМС - обычный (для англ.)
+    if (sendAtCmd("AT+CSCS=\"GSM\"")) DEBUG_PRINTLN("Кодировка текста установлена");        // режим кодировки текста
+    if (sendAtCmd("AT+CNMI=2,2")) DEBUG_PRINTLN("Настройки отображения SMS установлены");   // отображение смс в терминале сразу после приема (без этого сообщения молча падают в память)
+    if (sendAtCmd("AT&W")) DEBUG_PRINTLN("Настройки сохранены");                            // сохранение настроек в энергонезависимой памяти
+    delay(300);
+
+    // Запрашиваем уровень сигнала
+    mySerial.println("AT+CSQ");
+    unsigned long startTime = millis();
+    String response = "";
+
+    while (millis() - startTime < 2000) {  // Ждем 2 секунды
+        if (mySerial.available()) {
+            char c = mySerial.read();
+            response += c;
+        }
+    }
+
+    int csq = -1;
+    int index = response.indexOf("+CSQ: ");
+    if (index != -1) {
+        csq = response.substring(index + 6).toInt();
+    }
+
+    DEBUG_PRINT("\nУровень сигнала: ");
+    DEBUG_PRINTLN(csq);
+
+    if (csq < 10 || csq > 31) {
+        DEBUG_PRINTLN("Ошибка: слабый сигнал!");
+        return false;
+    }
+
+    DEBUG_PRINTLN("\nМодем успешно инициализирован");
+    return true;
 #endif
+
 #ifdef USE_SIM800
     sendAtCmd("AT");
     sendAtCmd("AT+CMGF=1");
@@ -191,9 +233,7 @@ String read_eeprom_number(int addr) {
     if (num.length() == 11 && num.startsWith("79")) {
         return num;  // Если номер правильный, возвращаем его
     }
-
-    if (addr == 10) return DEF_NUM;   // Возвращаем дефолтный номер 1
-    else return DEF_NUM_2;            // возвращаем дефолтный номер 2
+    else DEBUG_PRINTLN("\nНомер из EEPROM не считан");
 }
 
 //--------------------------------------------------------------
@@ -211,7 +251,7 @@ void switchRelay(bool newState) {
   digitalWrite(STAT_LED, newState);
   EEPROM.update(STAT_ADDR, newState);
   state = newState;
-  DEBUG_PRINTLN("\nRELAY: " + String(state ? "ON" : "OFF"));  // Сообщаем, что получили подтверждение
+  DEBUG_PRINTLN("\nРЕЛЕ: " + String(state ? "ON" : "OFF"));  // Сообщаем, что получили подтверждение
 }
 
 //--------------------------------------------------------------
@@ -281,6 +321,10 @@ void setup() {
   #ifdef USE_HEATING
   heaterVal = EEPROM.read(HEAT_ADDR);
   #endif
+
+  MASTER = read_eeprom_number(10);
+  MASTER2 = read_eeprom_number(30);
+  DEBUG_PRINTLN("Мастер номер: " + MASTER + "Мастер номер 2: " + MASTER2);
 }
 
 //--------------------------------------------------------------
@@ -322,6 +366,7 @@ Command getCommand(const String& val) {
         if (val.indexOf("sim master") > -1) return CMD_SIM_MASTER;
     }
     if (val.indexOf("RING") > -1) return CMD_RING;
+    DEBUG_PRINTLN("Команда не найдена, возвращаем CMD_UNKNOWN.");
     return CMD_UNKNOWN;
 }
 
@@ -335,7 +380,7 @@ void incoming_call_sms() {
     }
 
     val.toLowerCase();  // Приводим к нижнему регистру для единообразия
-    DEBUG_PRINTLN("ВХОДЯЩЕЕ СООБЩЕНИЕ:\n" + val); // Выводим результат прочтения
+    DEBUG_PRINTLN("ВХОДЯЩЕЕ СОБЫТИЕ:" + val); // Выводим результат прочтения
     Command cmd = getCommand(val);
     switch (cmd) {
         case CMD_STATUS:
@@ -444,6 +489,7 @@ void incoming_call_sms() {
             }
             break;
         default:
+            DEBUG_PRINTLN("Неизвестная команда");
             break;
     }
     val = "";
