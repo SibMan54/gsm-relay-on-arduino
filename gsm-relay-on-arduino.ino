@@ -1,5 +1,5 @@
 //******************************************************************************************
-// Проект GSM реле на Arduino с использованием модуля NEOWAY M590
+// Проект GSM розетка на Arduino с использованием модуля NEOWAY M590
 //******************************************************************************************
 
 #include <EEPROM.h>
@@ -25,7 +25,7 @@
 #define USE_TIMER                   // Закомментировать, если не нужен таймер
 // #define USE_READ_NUM_SIM         // Раскоментировать для считывания номера из SIM карты
 // #define USE_HEATING              // Раскоментировать для включения самоподогрева
-#define LINE_BREAK "\n"  // или "\r\n" (Тип переноса строки в СМС)
+#define LINE_BREAK "\n"             // или "\r\n" (Тип переноса строки в СМС)
 
 //---------КОНТАКТЫ--------------
 SoftwareSerial mySerial(10, 11);    // RX, TX для для связи с модемом
@@ -38,25 +38,27 @@ OneWire sensDs(DS18B20);            // Инициализация шины 1-Wir
 
 //---------ПЕРЕМЕННЫЕ--------------
 String oneNum = "79123456789";          // Основной мастер-номер
-String twoNum = "79123456789";         // Второй мастер-номер
+String twoNum = "79123456789";          // Второй мастер-номер
 String val = "";
-bool state = false;                     // Текущее состояние реле
-bool replySMS = false;
+bool state = false;                     // Текущее состояние нагрузки
+bool saveStat = false;                  // Переменная вкл/выкл сщхранения статуса нагрузки
+bool replySMS = false;                  // Переменная вкл/выкл ответных СМС на звонок
 byte bufData[9];                        // Буфер данных для термодатчика
 #ifdef USE_TIMER
-uint32_t timer = 0;                     // Таймер работы реле
+uint32_t timer = 0;                     // Таймер работы нагрузки
 #endif
 #ifdef USE_HEATING
 int8_t heaterVal = 1;                   // Состояние самоподогрева
 #endif
 volatile uint32_t lastPressTime = 0;    // Переменная для защиты от дребезга
-volatile uint8_t btnFlag=false;        // Флаг прерывания по нажатию кнопки
+volatile uint8_t btnFlag=false;         // Флаг прерывания по нажатию кнопки
 
 //---------АДРЕСА В EEPROM--------------
 #define STAT_ADDR 1
-#define TIMER_ADDR 2
-#define HEAT_ADDR 3
-#define ASMS_ADDR 4
+#define SS_ADDR 2
+#define REPL_ADDR 3
+#define TIMER_ADDR 4
+#define HEAT_ADDR 5
 
 //---------СОКРАЦЕНИЯ--------------
 #define CHECK_NUMBER (val.indexOf(oneNum) > -1 || val.indexOf(twoNum) > -1)
@@ -65,13 +67,14 @@ volatile uint8_t btnFlag=false;        // Флаг прерывания по н�
 enum Command {
     CMD_STATUS,
     CMD_TEMPERATURE,
-    CMD_RELAY_ON,
-    CMD_RELAY_OFF,
+    CMD_POWER_ON,
+    CMD_POWER_OFF,
     CMD_TIMER,
     CMD_TIMER_OFF,
     CMD_HEATING,
     CMD_HEATING_OFF,
     CMD_REPLY_SMS,
+    CMD_SAVE_STAT,
     CMD_ONE_NUM,
     CMD_TWO_NUM,
     CMD_SIM_NUM,
@@ -249,14 +252,16 @@ void update_eeprom_number(int addr, String num) {
 }
 
 //--------------------------------------------------------------
-// Управление реле
+// Управление нагрузкой
 //--------------------------------------------------------------
-void switchRelay(bool newState) {
+void switchPower(bool newState) {
   digitalWrite(POWER, newState);
   digitalWrite(STAT_LED, newState);
-  EEPROM.update(STAT_ADDR, newState);
   state = newState;
-  // DEBUG_PRINTLN("\nРЕЛЕ: " + String(state ? "ON" : "OFF"));  // Сообщаем, что получили подтверждение
+  if (saveStat) {
+    EEPROM.update(STAT_ADDR, newState);
+  }
+  // DEBUG_PRINTLN("\nPOWER: " + String(state ? "ON" : "OFF"));  // Сообщаем, что получили подтверждение
 }
 
 //--------------------------------------------------------------
@@ -281,7 +286,7 @@ float currentTemper() {
 #ifdef USE_TIMER
 void timerControl() {
   if (timer = 0 || millis() >= timer) {
-    switchRelay(false);
+    switchPower(false);
     timer = 0;
     EEPROM.update(TIMER_ADDR, false);
   }
@@ -317,10 +322,12 @@ void setup() {
 
   initModem();
 
-  state = EEPROM.read(STAT_ADDR);
-  switchRelay(state);
-  digitalWrite(STAT_LED, state);
-  replySMS = EEPROM.read(ASMS_ADDR);
+  saveStat = EEPROM.read(SS_ADDR);
+  if(saveStat) {
+    state = EEPROM.read(STAT_ADDR);
+    switchPower(state);
+  }
+  replySMS = EEPROM.read(REPL_ADDR);
   #ifdef USE_TIMER
   timer = EEPROM.read(TIMER_ADDR);
   #endif
@@ -341,7 +348,7 @@ void loop() {
   if(btnFlag==true && (millis() - lastPressTime > 200)) {
     btnFlag=false;
     lastPressTime = 0;
-    switchRelay(!state);
+    switchPower(!state);
   }
   #ifdef USE_HEATING
   if(heaterVal<1) heaterControl();
@@ -361,8 +368,8 @@ Command getCommand(const String& val) {
         val.trim();  // Очищаем от пробелов и \n
         val.toLowerCase();  // Приводим к нижнему регистру для единообразия
         if (val.indexOf("clear") > -1 && CHECK_NUMBER) return CMD_CLEAR;
-        if (val.indexOf("relay on") > -1 && CHECK_NUMBER && !state) return CMD_RELAY_ON;
-        if (val.indexOf("relay off") > -1 && CHECK_NUMBER && state) return CMD_RELAY_OFF;
+        if (val.indexOf("power on") > -1 && CHECK_NUMBER && !state) return CMD_POWER_ON;
+        if (val.indexOf("power off") > -1 && CHECK_NUMBER && state) return CMD_POWER_OFF;
         if (val.indexOf("timer ") > -1 && CHECK_NUMBER) return CMD_TIMER;
         if (val.indexOf("timer off") > -1 && CHECK_NUMBER) return CMD_TIMER_OFF;
         if (val.indexOf("heating ") > -1 && CHECK_NUMBER) return CMD_HEATING;
@@ -370,6 +377,7 @@ Command getCommand(const String& val) {
         if (val.indexOf("temper") > -1 && CHECK_NUMBER) return CMD_TEMPERATURE;
         if (val.indexOf("status") > -1 && CHECK_NUMBER) return CMD_STATUS;
         if (val.indexOf("reply sms") > -1 && CHECK_NUMBER) return CMD_REPLY_SMS;
+        if (val.indexOf("save stat") > -1 && CHECK_NUMBER) return CMD_SAVE_STAT;
         if (val.indexOf("new one number") > -1) return CMD_ONE_NUM;
         if (val.indexOf("new two number") > -1) return CMD_TWO_NUM;
         if (val.indexOf("new sim number") > -1) return CMD_SIM_NUM;
@@ -434,7 +442,8 @@ void incoming_call_sms() {
     // DEBUG_PRINTLN("Команда: " + String(cmd));  // Должно вывести CMD_...
     switch (cmd) {
         case CMD_STATUS:
-            sendSMS("RELAY: " + String(state ? "ON" : "OFF") + LINE_BREAK +
+            sendSMS("POWER: " + String(state ? "ON" : "OFF") + LINE_BREAK +
+                    "SAVE STATUS POWER: " + String(saveStat ? "ON" : "OFF") + LINE_BREAK +
                     "TEMP: " + String(currentTemper()) + "'C" + LINE_BREAK +
                     "REPLY SMS: " + String(replySMS ? "ON" : "OFF") + LINE_BREAK +
                     "NUM1: " + oneNum + LINE_BREAK +
@@ -443,13 +452,13 @@ void incoming_call_sms() {
         case CMD_TEMPERATURE:
             sendSMS("Temperature: " + String(currentTemper()) + "'C", NUMBER_TO_SEND);
             break;
-        case CMD_RELAY_ON:
-            switchRelay(true);
-            sendSMS("RELAY: " + String(state ? "ON" : "OFF"), NUMBER_TO_SEND);
+        case CMD_POWER_ON:
+            switchPower(true);
+            sendSMS("POWER: " + String(state ? "ON" : "OFF"), NUMBER_TO_SEND);
             break;
-        case CMD_RELAY_OFF:
-            switchRelay(false);
-            sendSMS("RELAY: " + String(state ? "ON" : "OFF"), NUMBER_TO_SEND);
+        case CMD_POWER_OFF:
+            switchPower(false);
+            sendSMS("POWER: " + String(state ? "ON" : "OFF"), NUMBER_TO_SEND);
             break;
         case CMD_CLEAR:
             sendSMS("CLEAR OK", NUMBER_TO_SEND);
@@ -459,9 +468,15 @@ void incoming_call_sms() {
             break;
         case CMD_REPLY_SMS:
             replySMS = !replySMS;
-            EEPROM.update(ASMS_ADDR, replySMS);
+            EEPROM.update(REPL_ADDR, replySMS);
             sendSMS("REPLY SMS: " + String(replySMS ? "ON" : "OFF"), NUMBER_TO_SEND);
             // DEBUG_PRINTLN("Отправка ответных СМС на звонок: " + String(replySMS ? "ON" : "OFF"));
+            break;
+        case CMD_SAVE_STAT:
+            saveStat = !saveStat;
+            EEPROM.update(SS_ADDR, saveStat);
+            sendSMS("SAVE STATUS POWER: " + String(saveStat ? "ON" : "OFF"), NUMBER_TO_SEND);
+            // DEBUG_PRINTLN("Сохр. статуса нагрузки: " + String(saveStat ? "ON" : "OFF"));
             break;
         case CMD_ONE_NUM:
             oneNum = extractNumber(val);
@@ -488,7 +503,7 @@ void incoming_call_sms() {
                 String timerTmp = val.substring(54);
                 timer = timerTmp.toInt() * 60000 + millis();
                 if (timer != 0) {
-                    switchRelay(true);
+                    switchPower(true);
                     EEPROM.update(TIMER_ADDR, true);
                     sendSMS("TIMER ON " + timerTmp + " MIN", NUMBER_TO_SEND);
                     // DEBUG_PRINTLN("Таймер вкл. на " + timerTmp + " MIN");
@@ -533,10 +548,10 @@ void incoming_call_sms() {
         case CMD_RING:
             if CHECK_NUMBER {
                 delay(500);
-                switchRelay(!state);
+                switchPower(!state);
                 sendAtCmd("ATH0");       // Завершение вызова
                 if (replySMS) {
-                    sendSMS("RELAY: " + String(state ? "ON" : "OFF"), NUMBER_TO_SEND);
+                    sendSMS("POWER: " + String(state ? "ON" : "OFF"), NUMBER_TO_SEND);
                 }
             } else {
                 sendAtCmd("ATA");       // Отвечаем на входящий вызов
