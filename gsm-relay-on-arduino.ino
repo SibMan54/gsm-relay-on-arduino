@@ -41,7 +41,7 @@ String oneNum = "79123456789";          // Основной мастер-ном�
 String twoNum = "79123456789";          // Второй мастер-номер
 String val = "";
 bool state = false;                     // Текущее состояние нагрузки
-bool saveStat = false;                  // Переменная вкл/выкл сщхранения статуса нагрузки
+bool saveState = false;                  // Переменная вкл/выкл сщхранения статуса нагрузки
 bool replySMS = false;                  // Переменная вкл/выкл ответных СМС на звонок
 byte bufData[9];                        // Буфер данных для термодатчика
 #ifdef USE_TIMER
@@ -54,10 +54,9 @@ volatile uint32_t lastPressTime = 0;    // Переменная для защи�
 volatile uint8_t btnFlag=false;         // Флаг прерывания по нажатию кнопки
 
 //---------АДРЕСА В EEPROM--------------
-#define STAT_ADDR 1
+#define STATE_ADDR 1
 #define SS_ADDR 2
 #define REPL_ADDR 3
-#define TIMER_ADDR 4
 #define HEAT_ADDR 5
 
 //---------СОКРАЦЕНИЯ--------------
@@ -70,11 +69,10 @@ enum Command {
     CMD_POWER_ON,
     CMD_POWER_OFF,
     CMD_TIMER,
-    CMD_TIMER_OFF,
     CMD_HEATING,
     CMD_HEATING_OFF,
     CMD_REPLY_SMS,
-    CMD_SAVE_STAT,
+    CMD_SAVE_STATE,
     CMD_ONE_NUM,
     CMD_TWO_NUM,
     CMD_SIM_NUM,
@@ -258,8 +256,8 @@ void switchPower(bool newState) {
   digitalWrite(POWER, newState);
   digitalWrite(STAT_LED, newState);
   state = newState;
-  if (saveStat) {
-    EEPROM.update(STAT_ADDR, newState);
+  if (saveState) {
+    EEPROM.update(STATE_ADDR, newState);
   }
   // DEBUG_PRINTLN("\nPOWER: " + String(state ? "ON" : "OFF"));  // Сообщаем, что получили подтверждение
 }
@@ -285,11 +283,10 @@ float currentTemper() {
 //--------------------------------------------------------------
 #ifdef USE_TIMER
 void timerControl() {
-  if (timer = 0 || millis() >= timer) {
-    switchPower(false);
-    timer = 0;
-    EEPROM.update(TIMER_ADDR, false);
-  }
+    if (timer == 0 || millis() >= timer) { 
+        switchPower(false);
+        timer = 0;
+    }
 }
 #endif
 
@@ -322,15 +319,12 @@ void setup() {
 
   initModem();
 
-  saveStat = EEPROM.read(SS_ADDR);
-  if(saveStat) {
-    state = EEPROM.read(STAT_ADDR);
+  saveState = EEPROM.read(SS_ADDR);
+  if(saveState) {
+    state = EEPROM.read(STATE_ADDR);
     switchPower(state);
   }
   replySMS = EEPROM.read(REPL_ADDR);
-  #ifdef USE_TIMER
-  timer = EEPROM.read(TIMER_ADDR);
-  #endif
   #ifdef USE_HEATING
   heaterVal = EEPROM.read(HEAT_ADDR);
   #endif
@@ -365,19 +359,18 @@ void loop() {
 
 Command getCommand(const String& val) {
     if (val.indexOf("+CMT") > -1) {
-        val.trim();  // Очищаем от пробелов и \n
-        val.toLowerCase();  // Приводим к нижнему регистру для единообразия
-        if (val.indexOf("clear") > -1 && CHECK_NUMBER) return CMD_CLEAR;
+        val.trim();                     // Очищаем от пробелов и \n
+        val.toLowerCase();              // Приводим к нижнему регистру для единообразия
         if (val.indexOf("power on") > -1 && CHECK_NUMBER && !state) return CMD_POWER_ON;
         if (val.indexOf("power off") > -1 && CHECK_NUMBER && state) return CMD_POWER_OFF;
-        if (val.indexOf("timer ") > -1 && CHECK_NUMBER) return CMD_TIMER;
-        if (val.indexOf("timer off") > -1 && CHECK_NUMBER) return CMD_TIMER_OFF;
-        if (val.indexOf("heating ") > -1 && CHECK_NUMBER) return CMD_HEATING;
+        if (val.indexOf("timer") > -1 && CHECK_NUMBER) return CMD_TIMER;
         if (val.indexOf("heating off") > -1 && CHECK_NUMBER) return CMD_HEATING_OFF;
+        if (val.indexOf("heating ") > -1 && CHECK_NUMBER) return CMD_HEATING;
+        if (val.indexOf("save state") > -1 && CHECK_NUMBER) return CMD_SAVE_STATE;
+        if (val.indexOf("reply sms") > -1 && CHECK_NUMBER) return CMD_REPLY_SMS;
         if (val.indexOf("temper") > -1 && CHECK_NUMBER) return CMD_TEMPERATURE;
         if (val.indexOf("status") > -1 && CHECK_NUMBER) return CMD_STATUS;
-        if (val.indexOf("reply sms") > -1 && CHECK_NUMBER) return CMD_REPLY_SMS;
-        if (val.indexOf("save stat") > -1 && CHECK_NUMBER) return CMD_SAVE_STAT;
+        if (val.indexOf("clear") > -1 && CHECK_NUMBER) return CMD_CLEAR;
         if (val.indexOf("new one number") > -1) return CMD_ONE_NUM;
         if (val.indexOf("new two number") > -1) return CMD_TWO_NUM;
         if (val.indexOf("new sim number") > -1) return CMD_SIM_NUM;
@@ -387,6 +380,48 @@ Command getCommand(const String& val) {
     return CMD_UNKNOWN;
 }
 
+//--------------------------------------------------------------
+// Функция извлечения времени из СМС
+//--------------------------------------------------------------
+unsigned long extractTime(const String& val) {
+    // Удаляем все пробелы из строки
+    String cleanedVal = val;
+    cleanedVal.replace(" ", "");
+
+    // Находим позицию ключевого слова "timer"
+    int timerPos = cleanedVal.indexOf("timer");
+    if (timerPos == -1) {
+        return 0; // Если ключевое слово "timer" не найдено, возвращаем 0
+    }
+
+    // Извлекаем подстроку, начиная с позиции после "timer"
+    String timeStr = cleanedVal.substring(timerPos + 5);
+
+    unsigned long hours = 0;
+    unsigned long minutes = 0;
+
+    // Ищем символ 'h' для извлечения часов
+    int hPos = timeStr.indexOf('h');
+    if (hPos != -1) {
+        hours = timeStr.substring(0, hPos).toInt();
+        timeStr = timeStr.substring(hPos + 1); // Убираем часть строки с часами
+    }
+
+    // Ищем символ 'm' для извлечения минут
+    int mPos = timeStr.indexOf('m');
+    if (mPos != -1) {
+        minutes = timeStr.substring(0, mPos).toInt();
+    } else if (timeStr.length() > 0) {
+        // Если символ 'm' отсутствует, но строка не пустая, значит это минуты
+        minutes = timeStr.toInt();
+    }
+
+    // Возвращаем общее время в минутах
+    return hours * 60 + minutes;
+}
+//--------------------------------------------------------------
+// Функция извлечения номера из СМС
+//--------------------------------------------------------------
 String extractNumber(String& val) {
     // Ищем ключевое слово "number "
     int numPos = val.indexOf("number ");
@@ -443,7 +478,7 @@ void incoming_call_sms() {
     switch (cmd) {
         case CMD_STATUS:
             sendSMS("POWER: " + String(state ? "ON" : "OFF") + LINE_BREAK +
-                    "SAVE STATUS POWER: " + String(saveStat ? "ON" : "OFF") + LINE_BREAK +
+                    "SAVE STATE POWER: " + String(saveState ? "ON" : "OFF") + LINE_BREAK +
                     "TEMP: " + String(currentTemper()) + "'C" + LINE_BREAK +
                     "REPLY SMS: " + String(replySMS ? "ON" : "OFF") + LINE_BREAK +
                     "NUM1: " + oneNum + LINE_BREAK +
@@ -472,11 +507,11 @@ void incoming_call_sms() {
             sendSMS("REPLY SMS: " + String(replySMS ? "ON" : "OFF"), NUMBER_TO_SEND);
             // DEBUG_PRINTLN("Отправка ответных СМС на звонок: " + String(replySMS ? "ON" : "OFF"));
             break;
-        case CMD_SAVE_STAT:
-            saveStat = !saveStat;
-            EEPROM.update(SS_ADDR, saveStat);
-            sendSMS("SAVE STATUS POWER: " + String(saveStat ? "ON" : "OFF"), NUMBER_TO_SEND);
-            // DEBUG_PRINTLN("Сохр. статуса нагрузки: " + String(saveStat ? "ON" : "OFF"));
+        case CMD_SAVE_STATE:
+            saveState = !saveState;
+            EEPROM.update(SS_ADDR, saveState);
+            sendSMS("SAVE STATE POWER: " + String(saveState ? "ON" : "OFF"), NUMBER_TO_SEND);
+            // DEBUG_PRINTLN("Сохр. состояния нагрузки: " + String(saveState ? "ON" : "OFF"));
             break;
         case CMD_ONE_NUM:
             oneNum = extractNumber(val);
@@ -500,26 +535,15 @@ void incoming_call_sms() {
 #ifdef USE_TIMER
         case CMD_TIMER:
             {
-                String timerTmp = val.substring(54);
-                timer = timerTmp.toInt() * 60000 + millis();
-                if (timer != 0) {
+                int extractedTime = extractTime(val);
+                if (extractedTime > 0) {
+                    timer = extractedTime * 60000 + millis(); // Минуты в миллисекунды
                     switchPower(true);
-                    EEPROM.update(TIMER_ADDR, true);
-                    sendSMS("TIMER ON " + timerTmp + " MIN", NUMBER_TO_SEND);
-                    // DEBUG_PRINTLN("Таймер вкл. на " + timerTmp + " MIN");
-                }
-                else {
-                    EEPROM.update(TIMER_ADDR, false);
-                    sendSMS("TIMER OFF", NUMBER_TO_SEND);
-                    // DEBUG_PRINTLN("Таймер выключен");
+                    sendSMS("TIMER: " + String(extractedTime) + " MIN", NUMBER_TO_SEND);
+                } else {
+                    sendSMS("TIMER: OFF", NUMBER_TO_SEND);
                 }
             }
-            break;
-        case CMD_TIMER_OFF:
-            timer = 0;
-            EEPROM.update(TIMER_ADDR, false);
-            sendSMS("TIMER OFF OK", NUMBER_TO_SEND);
-            // DEBUG_PRINTLN("Таймер успешно выключен");
             break;
 #endif
 #ifdef USE_HEATING
