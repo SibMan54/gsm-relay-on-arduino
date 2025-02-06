@@ -37,11 +37,11 @@ SoftwareSerial mySerial(10, 11);    // RX, TX для для связи с мод
 OneWire sensDs(DS18B20);            // Инициализация шины 1-Wire для работы датчика
 
 //---------ПЕРЕМЕННЫЕ--------------
-String MASTER = "79123456789";          // Основной мастер-номер
-String MASTER2 = "79123456789";         // Второй мастер-номер
+String oneNum = "79123456789";          // Основной мастер-номер
+String twoNum = "79123456789";         // Второй мастер-номер
 String val = "";
 bool state = false;                     // Текущее состояние реле
-bool answerSMS = false;
+bool replySMS = false;
 byte bufData[9];                        // Буфер данных для термодатчика
 #ifdef USE_TIMER
 uint32_t timer = 0;                     // Таймер работы реле
@@ -59,8 +59,8 @@ volatile uint8_t btnFlag=false;        // Флаг прерывания по н�
 #define ASMS_ADDR 4
 
 //---------СОКРАЦЕНИЯ--------------
-#define CHECK_NUMBER (val.indexOf(MASTER) > -1 || val.indexOf(MASTER2) > -1)
-#define NUMBER_TO_SEND (val.indexOf(MASTER) > -1) ? MASTER : MASTER2
+#define CHECK_NUMBER (val.indexOf(oneNum) > -1 || val.indexOf(twoNum) > -1)
+#define NUMBER_TO_SEND (val.indexOf(oneNum) > -1) ? oneNum : twoNum
 
 enum Command {
     CMD_STATUS,
@@ -71,10 +71,10 @@ enum Command {
     CMD_TIMER_OFF,
     CMD_HEATING,
     CMD_HEATING_OFF,
-    CMD_ANSWER_SMS,
-    CMD_NEW_MASTER,
-    CMD_NEW_MASTER2,
-    CMD_SIM_MASTER,
+    CMD_REPLY_SMS,
+    CMD_ONE_NUM,
+    CMD_TWO_NUM,
+    CMD_SIM_NUM,
     CMD_CLEAR,
     CMD_RING,
     CMD_UNKNOWN
@@ -96,7 +96,7 @@ bool sendAtCmd(String at_send, String ok_answer = "OK", uint16_t wait_sec = 2) {
       // Обрезаем лишние символы (если в ответе есть \r\nOK\r\n)
       answer.trim();
       if (answer.indexOf(ok_answer) > -1) {
-          // DEBUG_PRINTLN("\nOK received!");  // Сообщаем, что получили подтверждение
+          DEBUG_PRINTLN(" response!");  // Сообщаем, что получили подтверждение
         return true;
       }
     }
@@ -158,7 +158,7 @@ bool initModem() {
         DEBUG_PRINTLN("Ошибка: слабый сигнал!");
         return false;
     }
-
+    if (sendAtCmd("AT+CMGD=1,4")) DEBUG_PRINTLN("Память модема очищена");     //стереть все старые сообщения
     DEBUG_PRINTLN("\nМодем успешно инициализирован");
     return true;
 #endif
@@ -201,7 +201,7 @@ void readNumberSIM() {
   byte x = 0;
   while (mySerial.available()) mySerial.read();
   delay(100);
-  mySerial.println("AT+CPBF=\"MASTER\"");     //чтение номера из СИМ
+  mySerial.println("AT+CPBF=\"oneNum\"");     //чтение номера из СИМ
   delay(300);
   while (mySerial.available()) {         //сохраняем входную строку в переменную val
     ch = mySerial.read();
@@ -212,8 +212,8 @@ void readNumberSIM() {
     }
    }
    if (val.indexOf("79") > -1 && val.length() == 11) {
-     MASTER = val;
-     update_eeprom_number(10, MASTER);
+     oneNum = val;
+     update_eeprom_number(10, oneNum);
    }
 
    val = "";
@@ -227,7 +227,7 @@ String read_eeprom_number(int addr) {
     String num = "";
     char ch;
 
-    for (int i = 0; i < 11; i++) {  // Читаем до 11 символов
+    for (int i = 0; i < 12; i++) {  // Читаем до 11 символов
         ch = EEPROM.read(addr + i);
         if (ch == '\0' || ch == 0xFF) break;  // Останавливаемся, если пусто
         num += ch;
@@ -237,7 +237,8 @@ String read_eeprom_number(int addr) {
     if (num.length() == 11 && num.startsWith("79")) {
         return num;  // Если номер правильный, возвращаем его
     }
-    else DEBUG_PRINTLN("\nНомер из EEPROM не считан");
+    // if (addr==10) DEBUG_PRINTLN("\n1-й номер из EEPROM не считан");
+    // else DEBUG_PRINTLN("\n2-й номер из EEPROM не считан");
 }
 
 //--------------------------------------------------------------
@@ -255,7 +256,7 @@ void switchRelay(bool newState) {
   digitalWrite(STAT_LED, newState);
   EEPROM.update(STAT_ADDR, newState);
   state = newState;
-  DEBUG_PRINTLN("\nРЕЛЕ: " + String(state ? "ON" : "OFF"));  // Сообщаем, что получили подтверждение
+  // DEBUG_PRINTLN("\nРЕЛЕ: " + String(state ? "ON" : "OFF"));  // Сообщаем, что получили подтверждение
 }
 
 //--------------------------------------------------------------
@@ -319,6 +320,7 @@ void setup() {
   state = EEPROM.read(STAT_ADDR);
   switchRelay(state);
   digitalWrite(STAT_LED, state);
+  replySMS = EEPROM.read(ASMS_ADDR);
   #ifdef USE_TIMER
   timer = EEPROM.read(TIMER_ADDR);
   #endif
@@ -326,9 +328,9 @@ void setup() {
   heaterVal = EEPROM.read(HEAT_ADDR);
   #endif
 
-  MASTER = read_eeprom_number(10);
-  MASTER2 = read_eeprom_number(30);
-  DEBUG_PRINTLN("Мастер номер: " + MASTER + "Мастер номер 2: " + MASTER2);
+  oneNum = read_eeprom_number(10);
+  twoNum = read_eeprom_number(30);
+  // DEBUG_PRINTLN("Мастер номер: " + oneNum + "\nМастер номер 2: " + twoNum);
 }
 
 //--------------------------------------------------------------
@@ -356,89 +358,128 @@ void loop() {
 
 Command getCommand(const String& val) {
     if (val.indexOf("+CMT") > -1) {
-        if (CHECK_NUMBER && val.indexOf("clear") > -1) return CMD_CLEAR;
-        if (CHECK_NUMBER && val.indexOf("relay on") > -1 && !state) return CMD_RELAY_ON;
-        if (CHECK_NUMBER && val.indexOf("relay off") > -1 && state) return CMD_RELAY_OFF;
-        if (CHECK_NUMBER && val.indexOf("timer ") > -1) return CMD_TIMER;
-        if (CHECK_NUMBER && val.indexOf("timer off") > -1) return CMD_TIMER_OFF;
-        if (CHECK_NUMBER && val.indexOf("heating ") > -1) return CMD_HEATING;
-        if (CHECK_NUMBER && val.indexOf("heating off") > -1) return CMD_HEATING_OFF;
-        if (CHECK_NUMBER && val.indexOf("temper") > -1) return CMD_TEMPERATURE;
-        if (CHECK_NUMBER && val.indexOf("status") > -1) return CMD_STATUS;
-        if (CHECK_NUMBER && val.indexOf("answer sms") > -1) return CMD_ANSWER_SMS;
-        if (val.indexOf("new master") > -1) return CMD_NEW_MASTER;
-        if (val.indexOf("new master2") > -1) return CMD_NEW_MASTER2;
-        if (val.indexOf("sim master") > -1) return CMD_SIM_MASTER;
+        val.trim();  // Очищаем от пробелов и \n
+        val.toLowerCase();  // Приводим к нижнему регистру для единообразия
+        if (val.indexOf("clear") > -1 && CHECK_NUMBER) return CMD_CLEAR;
+        if (val.indexOf("relay on") > -1 && CHECK_NUMBER && !state) return CMD_RELAY_ON;
+        if (val.indexOf("relay off") > -1 && CHECK_NUMBER && state) return CMD_RELAY_OFF;
+        if (val.indexOf("timer ") > -1 && CHECK_NUMBER) return CMD_TIMER;
+        if (val.indexOf("timer off") > -1 && CHECK_NUMBER) return CMD_TIMER_OFF;
+        if (val.indexOf("heating ") > -1 && CHECK_NUMBER) return CMD_HEATING;
+        if (val.indexOf("heating off") > -1 && CHECK_NUMBER) return CMD_HEATING_OFF;
+        if (val.indexOf("temper") > -1 && CHECK_NUMBER) return CMD_TEMPERATURE;
+        if (val.indexOf("status") > -1 && CHECK_NUMBER) return CMD_STATUS;
+        if (val.indexOf("reply sms") > -1 && CHECK_NUMBER) return CMD_REPLY_SMS;
+        if (val.indexOf("new one number") > -1) return CMD_ONE_NUM;
+        if (val.indexOf("new two number") > -1) return CMD_TWO_NUM;
+        if (val.indexOf("new sim number") > -1) return CMD_SIM_NUM;
     }
     if (val.indexOf("RING") > -1) return CMD_RING;
-    DEBUG_PRINTLN("Команда не найдена, возвращаем CMD_UNKNOWN.");
+    // DEBUG_PRINTLN("Команда не найдена, возвращаем CMD_UNKNOWN.");
     return CMD_UNKNOWN;
 }
 
-void incoming_call_sms() {
-    byte ch = 0;
-    delay(200);
-    while (mySerial.available()) {
-        ch = mySerial.read();
-        val += char(ch);
-        delay(10);
+String extractNumber(String& val) {
+    // Ищем ключевое слово "number "
+    int numPos = val.indexOf("number ");
+    if (numPos > -1) {
+        numPos += 7; // Пропускаем слово "number "
+        int endNum = numPos;
+
+        // Ищем конец номера (до первого пробела или конца строки)
+        while (endNum < val.length() && isDigit(val[endNum])) {
+            endNum++;
+        }
+
+        // Проверяем, что номер состоит из 11 цифр
+        if (endNum - numPos == 11) {
+            return val.substring(numPos, endNum); // Возвращаем найденный номер
+        }
     }
 
-    val.toLowerCase();  // Приводим к нижнему регистру для единообразия
-    DEBUG_PRINTLN("ВХОДЯЩЕЕ СОБЫТИЕ:" + val); // Выводим результат прочтения
+    // Если номер не найден в сообщении или он некорректен, ищем в заголовке
+    int startQuote = val.indexOf("\"") + 1;
+    int endQuote = val.indexOf("\"", startQuote);
+    if (startQuote > 0 && endQuote > startQuote) {
+        String headerNumber = (val[startQuote] == '+') ? val.substring(startQuote + 1, endQuote) : val.substring(startQuote, endQuote);
+        if (headerNumber.length() == 11) {
+            return headerNumber;
+        }
+    }
+
+    // return ""; // Если номер не найден или невалиден, возвращаем пустую строку
+}
+
+void incoming_call_sms() {
+    val = "";  // Очищаем перед приёмом
+    byte ch = 0;
+    unsigned long startTime = millis();  // Засекаем время начала чтения
+
+    // Ждём прихода данных в буфер (до 3 секунд)
+    while (!mySerial.available() && millis() - startTime < 3000);
+
+    // Читаем данные
+    startTime = millis();  // Перезапускаем таймер
+    while (millis() - startTime < 1000) { // Читаем данные 1 секунду
+        while (mySerial.available()) {
+            ch = mySerial.read();
+            val += char(ch);
+            startTime = millis();  // Сброс таймера при поступлении данных
+        }
+    }
+    // DEBUG_PRINT("Получено: ");  // Отладка
+    // DEBUG_PRINTLN(val);  // Отладка
+
     Command cmd = getCommand(val);
+    // DEBUG_PRINTLN("Команда: " + String(cmd));  // Должно вывести CMD_...
     switch (cmd) {
         case CMD_STATUS:
             sendSMS("RELAY: " + String(state ? "ON" : "OFF") + LINE_BREAK +
                     "TEMP: " + String(currentTemper()) + "'C" + LINE_BREAK +
-                    "NUM1: " + MASTER + LINE_BREAK +
-                    "NUM2: " + MASTER2, NUMBER_TO_SEND);
-            DEBUG_PRINTLN("RELAY: " + String(state ? "ON" : "OFF") + LINE_BREAK +
-                    "TEMP: " + String(currentTemper()) + "'C" + LINE_BREAK +
-                    "NUM1: " + MASTER + LINE_BREAK +
-                    "NUM2: " + MASTER2);
+                    "REPLY SMS: " + String(replySMS ? "ON" : "OFF") + LINE_BREAK +
+                    "NUM1: " + oneNum + LINE_BREAK +
+                    "NUM2: " + twoNum, NUMBER_TO_SEND);
             break;
         case CMD_TEMPERATURE:
             sendSMS("Temperature: " + String(currentTemper()) + "'C", NUMBER_TO_SEND);
-            DEBUG_PRINTLN("Temperature: " + String(currentTemper()) + "`C");
             break;
         case CMD_RELAY_ON:
             switchRelay(true);
-            sendSMS("RELAY " + String(state ? "ON" : "OFF"), NUMBER_TO_SEND);
+            sendSMS("RELAY: " + String(state ? "ON" : "OFF"), NUMBER_TO_SEND);
             break;
         case CMD_RELAY_OFF:
             switchRelay(false);
-            sendSMS("RELAY " + String(state ? "ON" : "OFF"), NUMBER_TO_SEND);
+            sendSMS("RELAY: " + String(state ? "ON" : "OFF"), NUMBER_TO_SEND);
             break;
         case CMD_CLEAR:
             sendSMS("CLEAR OK", NUMBER_TO_SEND);
             delay(1000);
             sendAtCmd("AT+CMGD=1,4");
-            DEBUG_PRINTLN("Память очищена");
+            // DEBUG_PRINTLN("Память очищена");
             break;
-        case CMD_ANSWER_SMS:
-            answerSMS = !answerSMS;
-            EEPROM.update(ASMS_ADDR, answerSMS);
-            sendSMS("ANSWER SMS: " + String(answerSMS ? "ON" : "OFF"), NUMBER_TO_SEND);
-            DEBUG_PRINTLN("Отправка ответных СМС: " + String(answerSMS ? "ON" : "OFF"));
+        case CMD_REPLY_SMS:
+            replySMS = !replySMS;
+            EEPROM.update(ASMS_ADDR, replySMS);
+            sendSMS("REPLY SMS: " + String(replySMS ? "ON" : "OFF"), NUMBER_TO_SEND);
+            // DEBUG_PRINTLN("Отправка ответных СМС на звонок: " + String(replySMS ? "ON" : "OFF"));
             break;
-        case CMD_NEW_MASTER:
-            MASTER = val.substring(10, 21);
-            update_eeprom_number(10,MASTER);
-            sendSMS("Osnovnoi nomer izmenen na: " + MASTER, MASTER);
-            DEBUG_PRINTLN("Основной номер изменен на: " + MASTER);
+        case CMD_ONE_NUM:
+            oneNum = extractNumber(val);
+            update_eeprom_number(10,oneNum);
+            sendSMS("Osnovnoi nomer izmenen na: " + oneNum, NUMBER_TO_SEND);
+            DEBUG_PRINTLN("Основной номер изменен на: " + oneNum);
             break;
-        case CMD_NEW_MASTER2:
-            MASTER2 = val.substring(10, 21);
-            update_eeprom_number(30,MASTER2);
-            sendSMS("Vtoroi nomer izmenen na: " + MASTER2, MASTER2);
-            DEBUG_PRINTLN("Второй номер изменен на: " + MASTER2);
+        case CMD_TWO_NUM:
+            twoNum = extractNumber(val);
+            update_eeprom_number(30,twoNum);
+            sendSMS("Vtoroi nomer izmenen na: " + twoNum, NUMBER_TO_SEND);
+            DEBUG_PRINTLN("Второй номер изменен на: " + twoNum);
             break;
 #ifdef USE_READ_NUM_SIM
-        case CMD_SIM_MASTER:
+        case CMD_SIM_NUM:
             readNumberSIM();
-            sendSMS("Osnovnoi nomer izmenen na: " + MASTER, MASTER);
-            DEBUG_PRINTLN("Основной номер изменен на: " + MASTER);
+            sendSMS("Osnovnoi nomer izmenen na: " + oneNum, NUMBER_TO_SEND);
+            DEBUG_PRINTLN("Основной номер изменен на: " + oneNum);
             break;
 #endif
 #ifdef USE_TIMER
@@ -450,12 +491,12 @@ void incoming_call_sms() {
                     switchRelay(true);
                     EEPROM.update(TIMER_ADDR, true);
                     sendSMS("TIMER ON " + timerTmp + " MIN", NUMBER_TO_SEND);
-                    DEBUG_PRINTLN("Таймер вкл. на " + timerTmp + " MIN");
+                    // DEBUG_PRINTLN("Таймер вкл. на " + timerTmp + " MIN");
                 }
                 else {
                     EEPROM.update(TIMER_ADDR, false);
                     sendSMS("TIMER OFF", NUMBER_TO_SEND);
-                    DEBUG_PRINTLN("Таймер выключен");
+                    // DEBUG_PRINTLN("Таймер выключен");
                 }
             }
             break;
@@ -463,7 +504,7 @@ void incoming_call_sms() {
             timer = 0;
             EEPROM.update(TIMER_ADDR, false);
             sendSMS("TIMER OFF OK", NUMBER_TO_SEND);
-            DEBUG_PRINTLN("Таймер успешно выключен");
+            // DEBUG_PRINTLN("Таймер успешно выключен");
             break;
 #endif
 #ifdef USE_HEATING
@@ -474,11 +515,11 @@ void incoming_call_sms() {
                 EEPROM.update(HEAT_ADDR, heaterVal);
                 if (heaterVal < 1) {
                     sendSMS("HEATING ON " + String(heaterVal) + "'C", NUMBER_TO_SEND);
-                    DEBUG_PRINTLN("Подогрев вкл. при темп. " + String(heaterVal) + "'C");
+                    // DEBUG_PRINTLN("Подогрев вкл. при темп. " + String(heaterVal) + "'C");
                 }
                 else {
                     sendSMS("HEATING OFF, TEMP > +1 C`", NUMBER_TO_SEND);
-                    DEBUG_PRINTLN("Подогрев выкл. т.к. темп. выше +1`C");
+                    // DEBUG_PRINTLN("Подогрев выкл. т.к. темп. выше +1`C");
                 }
             }
             break;
@@ -486,20 +527,21 @@ void incoming_call_sms() {
             heaterVal = 1;
             EEPROM.update(HEAT_ADDR, heaterVal);
             sendSMS("HEATING OFF OK", NUMBER_TO_SEND);
-            DEBUG_PRINTLN("Подогрев успешно отключен");
+            // DEBUG_PRINTLN("Подогрев успешно отключен");
             break;
 #endif
         case CMD_RING:
             if CHECK_NUMBER {
                 delay(500);
                 switchRelay(!state);
-                sendAtCmd("ATH0");
-                if (answerSMS) {
-                    sendSMS("RELAY " + String(state ? "ON" : "OFF"), NUMBER_TO_SEND);
+                sendAtCmd("ATH0");       // Завершение вызова
+                if (replySMS) {
+                    sendSMS("RELAY: " + String(state ? "ON" : "OFF"), NUMBER_TO_SEND);
                 }
             } else {
-                delay(10500);
-                sendAtCmd("ATH");
+                sendAtCmd("ATA");       // Отвечаем на входящий вызов
+                delay(7000);            // Ждем 7 сек
+                sendAtCmd("ATH0");      // Завершение вызова
             }
             break;
         default:
