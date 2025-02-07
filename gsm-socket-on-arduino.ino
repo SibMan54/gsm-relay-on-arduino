@@ -32,6 +32,7 @@ SoftwareSerial mySerial(10, 11);    // RX, TX для для связи с мод
 #define POWER 12                    // Реле питания
 #define STAT_LED 13                 // Светодиод состояния
 #define BUTTON 2                    // Кнопка управления
+#define RING_PIN 3                  // Пин, подключенный к RING-выходу модема
 #define HEATER 6                    // Подогреватель
 #define DS18B20 7                   // Датчик температуры
 OneWire sensDs(DS18B20);            // Инициализация шины 1-Wire для работы датчика
@@ -51,7 +52,8 @@ uint32_t timer = 0;                     // Таймер работы нагру�
 int8_t heaterVal = 1;                   // Состояние самоподогрева
 #endif
 volatile uint32_t lastPressTime = 0;    // Переменная для защиты от дребезга
-volatile uint8_t btnFlag=false;         // Флаг прерывания по нажатию кнопки
+volatile bool btnFlag=false;            // Флаг прерывания по нажатию кнопки
+volatile bool ringFlag = false;         // Флаг прерывания при поступлении смс или звонка
 
 //---------АДРЕСА В EEPROM--------------
 #define STATE_ADDR 1
@@ -180,6 +182,13 @@ void buttonISR() {
   lastPressTime = millis();
 }
 
+//--------------------------------------------------------------
+// Обработчик прерывания при поступлении смс или звонка
+//--------------------------------------------------------------
+void ringISR() {
+    ringFlag = true;
+}
+
 //---------------------------------------------------
 // Процедура отправки СМС
 //---------------------------------------------------
@@ -283,7 +292,7 @@ float currentTemper() {
 //--------------------------------------------------------------
 #ifdef USE_TIMER
 void timerControl() {
-    if (timer == 0 || millis() >= timer) { 
+    if (timer == 0 || millis() >= timer) {
         switchPower(false);
         timer = 0;
     }
@@ -316,6 +325,7 @@ void setup() {
   pinMode(BUTTON, INPUT_PULLUP);
   pinMode(HEATER, OUTPUT);
   attachInterrupt(digitalPinToInterrupt(BUTTON), buttonISR, FALLING); // Настройка аппаратного прерывания
+  attachInterrupt(digitalPinToInterrupt(RING_PIN), ringISR, FALLING);
 
   initModem();
 
@@ -338,17 +348,20 @@ void setup() {
 // Основной цикл loop
 //--------------------------------------------------------------
 void loop() {
-  if (mySerial.available()) incoming_call_sms();
-  if(btnFlag==true && (millis() - lastPressTime > 200)) {
-    btnFlag=false;
-    lastPressTime = 0;
-    switchPower(!state);
+  if(ringFlag) {
+    ringFlag = false;               // Сбрасываем флаг
+    incoming_call_sms();            // Запускаем функцию обработки смс ил звонка
   }
-  #ifdef USE_HEATING
-  if(heaterVal<1) heaterControl();
-  #endif
+  if(btnFlag==true && (millis() - lastPressTime > 200)) {   // Антидребизг контактов (ждем 200 мс)
+    btnFlag=false;                  // Сбрасываем флаг
+    lastPressTime = 0;              // Сбрасываем время пред-го нажатия
+    switchPower(!state);            // Запускаем функцию управления нагрузкой
+  }
   #ifdef USE_TIMER
   if(timer!=0) timerControl();
+  #endif
+  #ifdef USE_HEATING
+  if(heaterVal<1) heaterControl();
   #endif
 }
 
