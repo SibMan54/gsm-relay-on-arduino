@@ -28,13 +28,13 @@
 #define LINE_BREAK "\n"             // или "\r\n" (Тип переноса строки в СМС)
 
 //---------КОНТАКТЫ--------------
-SoftwareSerial mySerial(10, 11);    // RX, TX для для связи с модемом
-#define POWER 12                    // Реле питания
-#define STAT_LED 13                 // Светодиод состояния
-#define BUTTON 2                    // Кнопка управления
+SoftwareSerial gsmSerial(10, 11);   // RX, TX для для связи с модемом
+#define POWER_PIN 12                // Реле питания
+#define STATE_LED 13                // Светодиод состояния
+#define BTN_PIN 2                   // Кнопка управления
 #define RING_PIN 3                  // Пин, подключенный к RING-выходу модема
 #define HEATER 6                    // Подогреватель
-#define DS18B20 7                   // Датчик температуры
+#define DS18B20 A3                   // Датчик температуры
 OneWire sensDs(DS18B20);            // Инициализация шины 1-Wire для работы датчика
 
 //---------ПЕРЕМЕННЫЕ--------------
@@ -42,7 +42,7 @@ String oneNum = "79123456789";          // Основной мастер-ном�
 String twoNum = "79123456789";          // Второй мастер-номер
 String val = "";
 bool state = false;                     // Текущее состояние нагрузки
-bool saveState = false;                  // Переменная вкл/выкл сщхранения статуса нагрузки
+bool saveState = false;                 // Переменная вкл/выкл сщхранения статуса нагрузки
 bool replySMS = false;                  // Переменная вкл/выкл ответных СМС на звонок
 byte bufData[9];                        // Буфер данных для термодатчика
 #ifdef USE_TIMER
@@ -84,16 +84,32 @@ enum Command {
 };
 
 //--------------------------------------------------------------
+// Функция для индикации с помощью светодиода
+//--------------------------------------------------------------
+void indicateLed(int blinkCount, int pauseOnOff, int pauseTime) {
+    pinMode(STATE_LED, OUTPUT); // Настраиваем пин светодиода как выход
+
+    for (int i = 0; i < blinkCount; i++) {
+        digitalWrite(STATE_LED, HIGH); // Включаем светодиод
+        delay(pauseOnOff);                 // Ждем указанное время
+        digitalWrite(STATE_LED, LOW);  // Выключаем светодиод
+        delay(pauseOnOff);                // Ждем указанное время
+    }
+
+    delay(pauseTime); // Пауза между циклами
+}
+
+//--------------------------------------------------------------
 // Функция отправки команды модему
 //--------------------------------------------------------------
 bool sendAtCmd(String at_send, String ok_answer = "OK", uint16_t wait_sec = 2) {
-  mySerial.println(at_send);
+  gsmSerial.println(at_send);
   uint32_t exit_ms = millis() + wait_sec * 1000;
   String answer = "";
 
   while (millis() < exit_ms) {
-    while (mySerial.available()) {
-      char c = mySerial.read();
+    while (gsmSerial.available()) {
+      char c = gsmSerial.read();
       answer += c;
       DEBUG_PRINT(c);      // Выводим ответ модема в монитор порта
       // Обрезаем лишние символы (если в ответе есть \r\nOK\r\n)
@@ -111,66 +127,134 @@ bool sendAtCmd(String at_send, String ok_answer = "OK", uint16_t wait_sec = 2) {
 //--------------------------------------------------------------
 // Инициализация GSM модема
 //--------------------------------------------------------------
+bool checkNetwork() {
+    String response; // Переменная для хранения ответа модема
+    int attempts = 5; // Количество попыток проверки регистрации
+    bool registered = false; // Флаг успешной регистрации
+
+    // Проверка регистрации в сети с несколькими попытками
+    for (int i = 0; i < attempts; i++) {
+        DEBUG_PRINT("Попытка регистрации: ");
+        DEBUG_PRINTLN(i + 1);
+
+        // Отправляем команду AT+CREG?
+        gsmSerial.println("AT+CREG?");
+        delay(500); // Даем модему время на ответ
+
+        // Чтение ответа от модема
+        response = "";
+        unsigned long startTime = millis();
+        while (millis() - startTime < 1000) { // Ждем ответа 1 секунду
+            if (gsmSerial.available()) {
+                response += gsmSerial.readString();
+            }
+        }
+
+        // DEBUG_PRINTLN("Ответ модема: " + response); // Вывод ответа для отладки
+
+        // Проверка, зарегистрирован ли модем в сети
+        if (response.indexOf("+CREG: 0,1") != -1 || response.indexOf("+CREG: 0,5") != -1) {
+            DEBUG_PRINTLN("Модем зарегистрирован в сети");
+            registered = true; // Устанавливаем флаг успешной регистрации
+            break; // Выходим из цикла
+        }
+
+        // DEBUG_PRINTLN("Модем не зарегистрирован в сети, повторная попытка...");
+        delay(1000); // Задержка перед следующей попыткой
+    }
+
+    // Если регистрация не удалась
+    if (!registered) {
+        DEBUG_PRINTLN("Модем не зарегистрирован в сети после всех попыток");
+        return false;
+    }
+
+    // Проверка уровня сигнала
+    gsmSerial.println("AT+CSQ");
+    delay(500); // Даем модему время на ответ
+
+    // Чтение ответа от модема
+    response = "";
+    unsigned long startTime = millis();
+    while (millis() - startTime < 1000) { // Ждем ответа 1 секунду
+        if (gsmSerial.available()) {
+            response += gsmSerial.readString();
+        }
+    }
+
+    // DEBUG_PRINTLN("Ответ модема: " + response); // Вывод ответа для отладки
+
+    // Извлечение уровня сигнала
+    int csq = -1;
+    int index = response.indexOf("+CSQ: ");
+    if (index != -1) {
+        csq = response.substring(index + 6, index + 8).toInt(); // Извлекаем значение уровня сигнала
+    }
+
+    DEBUG_PRINT("Уровень сигнала: ");
+    DEBUG_PRINTLN(csq);
+
+    // Проверка уровня сигнала (для SIM800 допустимые значения 0-31, где 99 - ошибка)
+    if (csq == 99 || csq < 10) {
+        DEBUG_PRINTLN("Ошибка: слабый сигнал или нет сети!");
+        return false;
+    }
+
+    DEBUG_PRINTLN("Уровень сигнала в норме");
+    return true;
+}
+
 bool initModem() {
-    mySerial.begin(9600);
+    gsmSerial.begin(9600);
     delay(2000);
 
 #ifdef USE_M590
-    digitalWrite(STAT_LED, HIGH);  // Включаем светодиод при старте
     DEBUG_PRINTLN("Ожидание готовности модема...");
 
-    while (!mySerial.find("PBREADY")) {  // Ждём сообщение "+PBREADY"
-        digitalWrite(STAT_LED, !digitalRead(STAT_LED));  // Мигание светодиодом
-        delay(500);
+    while (!gsmSerial.find("PBREADY")) {  // Ждём сообщение "+PBREADY"
+        indicateLed(1, 500, 500); // мигаем с частотой 0.5 сек
     }
 
-    digitalWrite(STAT_LED, LOW);  // Готовность, выключаем светодиод
-    DEBUG_PRINTLN("Модем готов!");
+    // DEBUG_PRINTLN("Модем готов!");
 
-    if (sendAtCmd("AT+IPR=9600")) DEBUG_PRINTLN("Скорость 9600 задана");                    // команда модему на установку скорости
-    delay(1000);
+    // Настройка модема
+    if (sendAtCmd("AT")) DEBUG_PRINTLN("Модем отвечает"); // Проверка связи с модемом
+    else if (sendAtCmd("AT+IPR=9600")) DEBUG_PRINTLN("Скорость 9600 задана"); delay(1000);  // команда модему на установку скорости
     if (sendAtCmd("AT+CLIP=1")) DEBUG_PRINTLN("АОН включен");                               // включаем АОН
     if (sendAtCmd("AT+CMGF=1")) DEBUG_PRINTLN("Режим SMS установлен");                      // режим кодировки СМС - обычный (для англ.)
     if (sendAtCmd("AT+CSCS=\"GSM\"")) DEBUG_PRINTLN("Кодировка текста установлена");        // режим кодировки текста
     if (sendAtCmd("AT+CNMI=2,2")) DEBUG_PRINTLN("Настройки отображения SMS установлены");   // отображение смс в терминале сразу после приема (без этого сообщения молча падают в память)
     if (sendAtCmd("AT&W")) DEBUG_PRINTLN("Настройки сохранены");                            // сохранение настроек в энергонезависимой памяти
-    delay(300);
+    delay(500);
 
-    // Запрашиваем уровень сигнала
-    mySerial.println("AT+CSQ");
-    unsigned long startTime = millis();
-    String response = "";
+    if (!checkNetwork()) return false;        // Проверка регистрации в сети и уровня сигнала
 
-    while (millis() - startTime < 2000) {  // Ждем 2 секунды
-        if (mySerial.available()) {
-            char c = mySerial.read();
-            response += c;
-        }
-    }
+    // Очистка памяти SMS
+    if (sendAtCmd("AT+CMGD=1,4")) DEBUG_PRINTLN("Память модема очищена"); // Удаление всех SMS
 
-    int csq = -1;
-    int index = response.indexOf("+CSQ: ");
-    if (index != -1) {
-        csq = response.substring(index + 6).toInt();
-    }
-
-    DEBUG_PRINT("\nУровень сигнала: ");
-    DEBUG_PRINTLN(csq);
-
-    if (csq < 10 || csq > 31) {
-        DEBUG_PRINTLN("Ошибка: слабый сигнал!");
-        return false;
-    }
-    if (sendAtCmd("AT+CMGD=1,4")) DEBUG_PRINTLN("Память модема очищена");     //стереть все старые сообщения
     DEBUG_PRINTLN("\nМодем успешно инициализирован");
     return true;
 #endif
 
 #ifdef USE_SIM800
-    sendAtCmd("AT");
-    sendAtCmd("AT+CMGF=1");
-    sendAtCmd("AT+CNMI=1,2,0,0,0"); // Настройка приема SMS
-    sendAtCmd("AT+CSMP=17,167,0,0"); // Настройка кодировки SMS
+    DEBUG_PRINTLN("Ожидание готовности модема...");
+
+    // Ждём сообщение "RDY" или "SMS Ready" от модема
+    while (!gsmSerial.find("RDY") && !gsmSerial.find("Ready")) {
+        indicateLed(1, 500, 500); // мигаем с частотой 0.5 сек
+    }
+
+    DEBUG_PRINTLN("Модем готов!");
+
+    // Настройка модема
+    if (sendAtCmd("AT")) DEBUG_PRINTLN("Модем отвечает"); // Проверка связи с модемом
+    else if (sendAtCmd("AT+IPR=9600")) DEBUG_PRINTLN("Скорость 9600 задана"); delay(1000);      // команда модему на установку скорости
+    if (sendAtCmd("AT+CMGF=1")) DEBUG_PRINTLN("Режим SMS установлен");                           // режим кодировки СМС - обычный (для англ.)
+    if (sendAtCmd("AT+CNMI=1,2,0,0,0")) DEBUG_PRINTLN("Настройки отображения SMS установлены"); // Настройка приема SMS
+    if (sendAtCmd("AT+CSMP=17,167,0,0")) DEBUG_PRINTLN("Кодировка текста установлена");         // Настройка кодировки SMS
+
+    if (!checkNetwork()) return false;        // Проверка регистрации в сети и уровня сигнала
+
 #endif
 }
 
@@ -194,11 +278,11 @@ void ringISR() {
 //---------------------------------------------------
 void sendSMS(String text, String phone)
 {
-  mySerial.println("AT+CMGS=\"+" + phone + "\"");
+  gsmSerial.println("AT+CMGS=\"+" + phone + "\"");
   delay(500);
-  mySerial.print(text);
+  gsmSerial.print(text);
   delay(500);
-  mySerial.print((char)26);
+  gsmSerial.print((char)26);
   delay(5000);
 }
 
@@ -209,12 +293,12 @@ void sendSMS(String text, String phone)
 void readNumberSIM() {
   byte ch = 0;
   byte x = 0;
-  while (mySerial.available()) mySerial.read();
+  while (gsmSerial.available()) gsmSerial.read();
   delay(100);
-  mySerial.println("AT+CPBF=\"oneNum\"");     //чтение номера из СИМ
+  gsmSerial.println("AT+CPBF=\"oneNum\"");     //чтение номера из СИМ
   delay(300);
-  while (mySerial.available()) {         //сохраняем входную строку в переменную val
-    ch = mySerial.read();
+  while (gsmSerial.available()) {         //сохраняем входную строку в переменную val
+    ch = gsmSerial.read();
     x++;
     if((x > 30) && (x < 42)) {
       val += char(ch);
@@ -262,8 +346,8 @@ void update_eeprom_number(int addr, String num) {
 // Управление нагрузкой
 //--------------------------------------------------------------
 void switchPower(bool newState) {
-  digitalWrite(POWER, newState);
-  digitalWrite(STAT_LED, newState);
+  digitalWrite(POWER_PIN, newState);
+  digitalWrite(STATE_LED, newState);
   state = newState;
   if (saveState) {
     EEPROM.update(STATE_ADDR, newState);
@@ -320,14 +404,30 @@ void setup() {
   #ifdef DEBUG_ENABLE
   Serial.begin(9600);
   #endif
-  pinMode(POWER, OUTPUT);
-  pinMode(STAT_LED, OUTPUT);
-  pinMode(BUTTON, INPUT_PULLUP);
+  pinMode(POWER_PIN, OUTPUT);
+  pinMode(STATE_LED, OUTPUT);
+  pinMode(BTN_PIN, INPUT_PULLUP);
+  pinMode(RING_PIN, INPUT_PULLUP);
   pinMode(HEATER, OUTPUT);
-  attachInterrupt(digitalPinToInterrupt(BUTTON), buttonISR, FALLING); // Настройка аппаратного прерывания
+  attachInterrupt(digitalPinToInterrupt(BTN_PIN), buttonISR, FALLING); // Настройка аппаратного прерывания
   attachInterrupt(digitalPinToInterrupt(RING_PIN), ringISR, FALLING);
 
-  initModem();
+bool initFlag = false;
+int attempts = 3;
+while (attempts-- > 0) {
+    if (initModem()) {
+        initFlag = true;
+        break;
+    }
+    #ifdef USE_M590
+        if(sendAtCmd("AT+CRESET")) //DEBUG_PRINTLN("Модем перезагружен");
+    #endif
+    #ifdef USE_SIM800
+        if(sendAtCmd("AT+CFUN=1,1")) //DEBUG_PRINTLN("Модем перезагружен");
+    #endif
+    delay(5000); // Ждем 5 секунд перед повторной попыткой
+}
+if (!initFlag) while(1) indicateLed(2, 200, 1000); // 2 мигания (0.2 сек) пауза 1 сек
 
   saveState = EEPROM.read(SS_ADDR);
   if(saveState) {
@@ -472,13 +572,13 @@ void incoming_call_sms() {
     unsigned long startTime = millis();  // Засекаем время начала чтения
 
     // Ждём прихода данных в буфер (до 3 секунд)
-    while (!mySerial.available() && millis() - startTime < 3000);
+    while (!gsmSerial.available() && millis() - startTime < 3000);
 
     // Читаем данные
     startTime = millis();  // Перезапускаем таймер
     while (millis() - startTime < 1000) { // Читаем данные 1 секунду
-        while (mySerial.available()) {
-            ch = mySerial.read();
+        while (gsmSerial.available()) {
+            ch = gsmSerial.read();
             val += char(ch);
             startTime = millis();  // Сброс таймера при поступлении данных
         }
