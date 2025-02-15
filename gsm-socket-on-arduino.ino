@@ -3,8 +3,9 @@
 //******************************************************************************************
 
 #include <EEPROM.h>
+#include <GyverDS18.h>
 #include <SoftwareSerial.h>
-#include <OneWire.h>
+// #include <AltSoftSerial.h>
 
 //---------ОТЛАДКА--------------
 // #define DEBUG_ENABLE                // Раскомментируй, чтобы включить отладку
@@ -21,7 +22,6 @@
 // #define USE_SIM800 // Раскомментируйте для использования SIM800
 
 //---------НАСТРОЙКА--------------
-#define DS_POWER_MODE 1             // Режим питания датчика
 #define USE_TIMER                   // Закомментировать, если не нужен таймер
 // #define USE_READ_NUM_SIM         // Раскоментировать для считывания номера из SIM карты
 // #define USE_HEATING              // Раскоментировать для включения самоподогрева
@@ -29,13 +29,14 @@
 
 //---------КОНТАКТЫ--------------
 SoftwareSerial gsmSerial(10, 11);   // RX, TX для для связи с модемом
+// AltSoftSerial gsmSerial;         // RX - 8, TX - 9 для для связи с модемом
 #define POWER_PIN 12                // Реле питания
 #define STATE_LED 13                // Светодиод состояния
 #define BTN_PIN 2                   // Кнопка управления
 #define RING_PIN 3                  // Пин, подключенный к RING-выходу модема
 #define HEATER 6                    // Подогреватель
-#define DS18B20 A3                   // Датчик температуры
-OneWire sensDs(DS18B20);            // Инициализация шины 1-Wire для работы датчика
+#define DS_PIN A3                   // Датчик температуры
+GyverDS18Single ds(DS_PIN);         // Создание объекта GyverDS18Single
 
 //---------ПЕРЕМЕННЫЕ--------------
 String oneNum = "79123456789";          // Основной мастер-номер
@@ -358,17 +359,15 @@ void switchPower(bool newState) {
 //--------------------------------------------------------------
 // Измерение температуры
 //--------------------------------------------------------------
-float currentTemper() {
-  sensDs.reset();
-  sensDs.write(0xCC, DS_POWER_MODE);
-  sensDs.write(0x44, DS_POWER_MODE);
-  delay(900);
-  sensDs.reset();
-  sensDs.write(0xCC, DS_POWER_MODE);
-  sensDs.write(0xBE, DS_POWER_MODE);
-  sensDs.read_bytes(bufData, 9);
-  if (OneWire::crc8(bufData, 8) != bufData[8]) return -127.0;
-  return (float)((int)bufData[0] | (((int)bufData[1]) << 8)) * 0.0625 + 0.03125;
+bool currentTemper(float &temperature) {
+  ds.requestTemp();                         // Запрос измерения температуры
+  if (ds.waitReady() && ds.readTemp()) {    // Подождать, затем прочитать
+    temperature = ds.getTemp();             // Если чтение успешно, то записываем температуру
+    return true;                            // Успешное измерение
+  }
+  else {
+    return false;                           // Ошибка измерения
+  }
 }
 
 //--------------------------------------------------------------
@@ -452,7 +451,7 @@ void loop() {
     ringFlag = false;               // Сбрасываем флаг
     incoming_call_sms();            // Запускаем функцию обработки смс ил звонка
   }
-  if(btnFlag==true && (millis() - lastPressTime > 200)) {   // Антидребизг контактов (ждем 200 мс)
+  if(btnFlag==true && (millis() - lastPressTime > 300)) {   // Антидребизг контактов (ждем 200 мс)
     btnFlag=false;                  // Сбрасываем флаг
     lastPressTime = 0;              // Сбрасываем время пред-го нажатия
     switchPower(!state);            // Запускаем функцию управления нагрузкой
@@ -590,15 +589,30 @@ void incoming_call_sms() {
     // DEBUG_PRINTLN("Команда: " + String(cmd));  // Должно вывести CMD_...
     switch (cmd) {
         case CMD_STATUS:
-            sendSMS("POWER: " + String(state ? "ON" : "OFF") + LINE_BREAK +
-                    "SAVE STATE POWER: " + String(saveState ? "ON" : "OFF") + LINE_BREAK +
-                    "TEMP: " + String(currentTemper()) + "'C" + LINE_BREAK +
-                    "REPLY SMS: " + String(replySMS ? "ON" : "OFF") + LINE_BREAK +
-                    "NUM1: " + oneNum + LINE_BREAK +
-                    "NUM2: " + twoNum, NUMBER_TO_SEND);
+            {
+              float temperature;
+              String temp = "";
+              if (currentTemper(temperature)) { // Измеряем температуру
+                temp = String(temperature) + "'C";
+              } else temp = "ERROR";
+              sendSMS("POWER: " + String(state ? "ON" : "OFF") + LINE_BREAK +
+                      "SAVE STATE POWER: " + String(saveState ? "ON" : "OFF") + LINE_BREAK +
+                      "TEMP: " + temp + LINE_BREAK +
+                      "REPLY SMS: " + String(replySMS ? "ON" : "OFF") + LINE_BREAK +
+                      "NUM1: " + oneNum + LINE_BREAK +
+                      "NUM2: " + twoNum, NUMBER_TO_SEND);
+            }
             break;
         case CMD_TEMPERATURE:
-            sendSMS("Temperature: " + String(currentTemper()) + "'C", NUMBER_TO_SEND);
+            {
+              float temperature;
+              String temp = "";
+              if (currentTemper(temperature)) { // Измеряем температуру
+                temp = String(temperature) + "'C";
+              } else temp = "ERROR";
+
+              sendSMS("TEMPERATURE: " + temp, NUMBER_TO_SEND);
+            }
             break;
         case CMD_POWER_ON:
             switchPower(true);
