@@ -2,10 +2,17 @@
 // Проект GSM розетка на Arduino с использованием модуля NEOWAY M590
 //******************************************************************************************
 
+#include <Arduino.h>
 #include <EEPROM.h>
+//---------НАСТРОЙКА БИБЛИОТЕКИ EncButton--------------
+#define EB_NO_FOR           // отключить поддержку pressFor/holdFor/stepFor и счётчик степов (экономит 2 байта оперативки)
+#define EB_NO_CALLBACK      // отключить обработчик событий attach (экономит 2 байта оперативки)
+#define EB_NO_COUNTER       // отключить счётчик энкодера (экономит 4 байта оперативки)
+#define EB_NO_BUFFER        // отключить буферизацию энкодера (экономит 1 байт оперативки)
+#include <EncButton.h>
 #include <GyverDS18.h>
-#include <SoftwareSerial.h>
-// #include <AltSoftSerial.h>
+// #include <SoftwareSerial.h>
+#include <AltSoftSerial.h>
 
 //---------ОТЛАДКА--------------
 // #define DEBUG_ENABLE                // Раскомментируй, чтобы включить отладку
@@ -23,20 +30,22 @@
 
 //---------НАСТРОЙКА--------------
 #define USE_TIMER                   // Закомментировать, если не нужен таймер
+// #define USE_STATE_LED_POWER      // Раскоментировать, если нужна индикация акл/выкл нагрузки при помощи STATE_LED
 // #define USE_READ_NUM_SIM         // Раскоментировать для считывания номера из SIM карты
 // #define USE_HEATING              // Раскоментировать для включения самоподогрева
 #define LINE_BREAK "\n"             // или "\r\n" (Тип переноса строки в СМС)
 
 //---------КОНТАКТЫ--------------
-SoftwareSerial gsmSerial(10, 11);   // RX, TX для для связи с модемом
-// AltSoftSerial gsmSerial;         // RX - 8, TX - 9 для для связи с модемом
+// SoftwareSerial gsmSerial(10, 11);   // RX, TX для для связи с модемом
+AltSoftSerial gsmSerial;            // RX - 8, TX - 9 для для связи с модемом
 #define POWER_PIN 12                // Реле питания
 #define STATE_LED 13                // Светодиод состояния
-#define BTN_PIN 2                   // Кнопка управления
 #define RING_PIN 3                  // Пин, подключенный к RING-выходу модема
-#define HEATER 6                    // Подогреватель
+#define BTN_PIN 2                   // Кнопка управления
+ButtonT<BTN_PIN> btn;               // Создание объекта btn
 #define DS_PIN A3                   // Датчик температуры
 GyverDS18Single ds(DS_PIN);         // Создание объекта GyverDS18Single
+#define HEATER 6                    // Подогреватель
 
 //---------ПЕРЕМЕННЫЕ--------------
 String oneNum = "79123456789";          // Основной мастер-номер
@@ -52,8 +61,6 @@ uint32_t timer = 0;                     // Таймер работы нагру�
 #ifdef USE_HEATING
 int8_t heaterVal = 1;                   // Состояние самоподогрева
 #endif
-volatile uint32_t lastPressTime = 0;    // Переменная для защиты от дребезга
-volatile bool btnFlag=false;            // Флаг прерывания по нажатию кнопки
 volatile bool ringFlag = false;         // Флаг прерывания при поступлении смс или звонка
 
 //---------АДРЕСА В EEPROM--------------
@@ -263,8 +270,7 @@ bool initModem() {
 // Обработчик прерывания кнопки с защитой от дребезга
 //--------------------------------------------------------------
 void buttonISR() {
-  btnFlag=true;
-  lastPressTime = millis();
+  btn.pressISR(); // Обновление состояния кнопки в прерывании
 }
 
 //--------------------------------------------------------------
@@ -348,7 +354,9 @@ void update_eeprom_number(int addr, String num) {
 //--------------------------------------------------------------
 void switchPower(bool newState) {
   digitalWrite(POWER_PIN, newState);
-  digitalWrite(STATE_LED, newState);
+  #ifdef USE_STATE_LED_POWER
+    digitalWrite(STATE_LED, newState);
+  #endif
   state = newState;
   if (saveState) {
     EEPROM.update(STATE_ADDR, newState);
@@ -405,28 +413,37 @@ void setup() {
   #endif
   pinMode(POWER_PIN, OUTPUT);
   pinMode(STATE_LED, OUTPUT);
-  pinMode(BTN_PIN, INPUT_PULLUP);
   pinMode(RING_PIN, INPUT_PULLUP);
-  pinMode(HEATER, OUTPUT);
-  attachInterrupt(digitalPinToInterrupt(BTN_PIN), buttonISR, FALLING); // Настройка аппаратного прерывания
-  attachInterrupt(digitalPinToInterrupt(RING_PIN), ringISR, FALLING);
+  #ifdef USE_HEATING
+    pinMode(HEATER, OUTPUT);
+  #endif
+  attachInterrupt(digitalPinToInterrupt(BTN_PIN), buttonISR, FALLING);  // Настройка аппаратного прерывания на спадающий фронт (FALLING)
+  attachInterrupt(digitalPinToInterrupt(RING_PIN), ringISR, FALLING);   // Настройка аппаратного прерывания на спадающий фронт (FALLING)
 
-bool initFlag = false;
-int attempts = 3;
-while (attempts-- > 0) {
-    if (initModem()) {
+  if (btn.read()){       // Если зажать кнопку при включении то очистится EEPROM
+    for (int i = 0 ; i < EEPROM.length() ; i++) {
+      EEPROM.write(i, 0);
+    }
+    // DEBUG_PRINTLN(F("EEPROM очищена"));
+    indicateLed(5,150,0);
+  }
+
+  bool initFlag = false;              // Флаг удачной инициализации модема
+  int attempts = 3;                   // Количество попыток инициализации модема
+  while (attempts-- > 0) {
+    if (initModem()) {                // Инициализация модема
         initFlag = true;
         break;
     }
     #ifdef USE_M590
-        if(sendAtCmd("AT+CRESET")) //DEBUG_PRINTLN("Модем перезагружен");
+      if(sendAtCmd("AT+CRESET")) //DEBUG_PRINTLN("Модем перезагружен");
     #endif
     #ifdef USE_SIM800
-        if(sendAtCmd("AT+CFUN=1,1")) //DEBUG_PRINTLN("Модем перезагружен");
+      if(sendAtCmd("AT+CFUN=1,1")) //DEBUG_PRINTLN("Модем перезагружен");
     #endif
     delay(5000); // Ждем 5 секунд перед повторной попыткой
-}
-if (!initFlag) while(1) indicateLed(2, 200, 1000); // 2 мигания (0.2 сек) пауза 1 сек
+  }
+  if (!initFlag) while(1) indicateLed(2, 200, 1000); // Если ошибка инициализации - 2 мигания с паузой 0.2 сек, затем пауза 1 сек
 
   saveState = EEPROM.read(SS_ADDR);
   if(saveState) {
@@ -447,15 +464,16 @@ if (!initFlag) while(1) indicateLed(2, 200, 1000); // 2 мигания (0.2 се
 // Основной цикл loop
 //--------------------------------------------------------------
 void loop() {
+  btn.tick();                       // Обновление состояния кнопки
+  if (btn.click()) {                // Если кнопка была нажата и отпущена
+    switchPower(!state);            // Запускаем функцию управления нагрузкой
+  }
+
   if(ringFlag) {
     ringFlag = false;               // Сбрасываем флаг
     incoming_call_sms();            // Запускаем функцию обработки смс ил звонка
   }
-  if(btnFlag==true && (millis() - lastPressTime > 300)) {   // Антидребизг контактов (ждем 200 мс)
-    btnFlag=false;                  // Сбрасываем флаг
-    lastPressTime = 0;              // Сбрасываем время пред-го нажатия
-    switchPower(!state);            // Запускаем функцию управления нагрузкой
-  }
+
   #ifdef USE_TIMER
   if(timer!=0) timerControl();
   #endif
