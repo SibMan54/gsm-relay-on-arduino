@@ -302,7 +302,7 @@ void readNumberSIM() {
   byte x = 0;
   while (gsmSerial.available()) gsmSerial.read();
   delay(100);
-  gsmSerial.println("AT+CPBF=\"oneNum\"");     //чтение номера из СИМ
+  gsmSerial.println("AT+CPBF=\"GsmSocket\"");     //чтение номера из СИМ
   delay(300);
   while (gsmSerial.available()) {         //сохраняем входную строку в переменную val
     ch = gsmSerial.read();
@@ -468,6 +468,12 @@ void loop() {
   if (btn.click()) {                // Если кнопка была нажата и отпущена
     switchPower(!state);            // Запускаем функцию управления нагрузкой
   }
+  // if (btn.hold()) {
+  //   // Действие при длительном нажатии
+  // }
+  // if (btn.hasClicks(2)) {
+  //   // Действие при двойном нажатии
+  // }
 
   if(ringFlag) {
     ringFlag = false;               // Сбрасываем флаг
@@ -614,8 +620,8 @@ void incoming_call_sms() {
                 temp = String(temperature) + "'C";
               } else temp = "ERROR";
               sendSMS("POWER: " + String(state ? "ON" : "OFF") + LINE_BREAK +
-                      "SAVE STATE POWER: " + String(saveState ? "ON" : "OFF") + LINE_BREAK +
                       "TEMP: " + temp + LINE_BREAK +
+                      "SAVE STATE POWER: " + String(saveState ? "ON" : "OFF") + LINE_BREAK +
                       "REPLY SMS: " + String(replySMS ? "ON" : "OFF") + LINE_BREAK +
                       "NUM1: " + oneNum + LINE_BREAK +
                       "NUM2: " + twoNum, NUMBER_TO_SEND);
